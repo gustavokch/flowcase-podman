@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS refresh_tokens;
+DROP TABLE IF EXISTS logs;
+DROP TABLE IF EXISTS registries;
+DROP TABLE IF EXISTS droplet_instances;
+DROP TABLE IF EXISTS droplet_groups;
+DROP TABLE IF EXISTS droplets;
+DROP TABLE IF EXISTS group_permissions;
+DROP TABLE IF EXISTS user_groups;
+DROP TABLE IF EXISTS groups;
+DROP TABLE IF EXISTS users;

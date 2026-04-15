@@ -1,0 +1,33 @@
+services:
+  flowcase:
+    build:
+      context: .
+      dockerfile: v2.Dockerfile
+    image: flowcaseweb/flowcase:v2
+    container_name: flowcase
+    restart: unless-stopped
+    ports:
+      - "80:8080"
+    volumes:
+      - flowcase-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - FLOWCASE_HOST=0.0.0.0
+      - FLOWCASE_PORT=8080
+      - FLOWCASE_DATA_DIR=/data
+      - FLOWCASE_DEBUG=false
+      # TLS (uncomment for production with ACME)
+      # - FLOWCASE_TLS_ENABLED=true
+      # - FLOWCASE_TLS_ACME=true
+      # - FLOWCASE_DOMAIN=flowcase.example.com
+      # - FLOWCASE_TLS_EMAIL=admin@example.com
+      # OIDC (uncomment to enable external SSO)
+      # - FLOWCASE_OIDC_ENABLED=true
+      # - FLOWCASE_OIDC_ISSUER=https://auth.example.com
+      # - FLOWCASE_OIDC_CLIENT_ID=flowcase
+      # - FLOWCASE_OIDC_CLIENT_SECRET=secret
+      # - FLOWCASE_OIDC_REDIRECT_URL=https://flowcase.example.com/api/auth/oidc/callback
+
+volumes:
+  flowcase-data:
+    external: false
