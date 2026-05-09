@@ -3,6 +3,7 @@ module github.com/flowcase/flowcase
 go 1.23
 
 require (
+	github.com/alexedwards/scs/sqlite3store v0.0.0-20251002162104-209de6e426de // indirect
 	github.com/alexedwards/scs/v2 v2.8.0 // indirect
 	github.com/docker/docker v27.3.1+incompatible // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
