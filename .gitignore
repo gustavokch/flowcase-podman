@@ -167,3 +167,10 @@ data/*
 # MacOS
 #
 .DS_Store
+
+#
+# Go
+#
+vendor/
+*.test
+/flowcase
