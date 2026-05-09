@@ -115,7 +115,7 @@ func CheckExternalIdentity(
 	}
 
 	if user == nil {
-		user, err = createExternalUser(identity, users, groups)
+		user, err = CreateExternalUser(identity, users, groups)
 		if err != nil {
 			log.Error("Failed to process external identity authentication for %s: %s", identity, err)
 			return false, err
@@ -130,12 +130,16 @@ func CheckExternalIdentity(
 	return true, nil
 }
 
-// createExternalUser is the Go equivalent of auth.py:42-55 +
+// CreateExternalUser is the Go equivalent of auth.py:42-55 +
 // create_user at auth.py:237-243. Username is stored lowercase
 // (matches auth.py:239), password is a random 16-char string we never
 // reveal, auth_token is freshly generated, group is "Unassigned" if it
 // exists (else empty, matching auth.py:49 fallback), usertype="External".
-func createExternalUser(username string, users *models.UsersRepo, groups *models.GroupsRepo) (*models.User, error) {
+//
+// Exported so the /droplet_connect handler (T3.6) can call it
+// without going through CheckExternalIdentity (which would also set
+// the session + identity cookies — wrong for an nginx auth subrequest).
+func CreateExternalUser(username string, users *models.UsersRepo, groups *models.GroupsRepo) (*models.User, error) {
 	if username == "" {
 		return nil, errors.New("createExternalUser: empty username")
 	}

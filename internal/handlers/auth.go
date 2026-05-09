@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -15,6 +16,11 @@ import (
 	"github.com/flowcase/flowcase/internal/models"
 	"github.com/flowcase/flowcase/internal/nginx"
 )
+
+// subtleConstantTimeCompare is a tiny indirection so the import name
+// stays unused-warning-free if a refactor moves the constantTimeEqual
+// helper elsewhere.
+var subtleConstantTimeCompare = subtle.ConstantTimeCompare
 
 // flashErrorKey is where Index flash errors live in the scs session.
 // Matches Flask's `session['error']` semantics: set on /login failure,
@@ -259,5 +265,106 @@ func lookupUsername(users *models.UsersRepo, uid string) string {
 	return uid
 }
 
-// (permissionsCheck helper deferred to T3.7's dashboard handler so
-//  golangci-lint's `unused` doesn't trip on the orphan helper here.)
+// DropletConnect handles GET /droplet_connect. Mirrors auth.py:190-232.
+//
+// nginx invokes this as an `auth_request /droplet_connect;` subrequest
+// for every proxied URL under /desktop/<id>/…. Returns 200 on
+// authentication success, 401 on failure. The body is intentionally
+// empty — nginx only reads the status code.
+//
+// Authentication tries, in order:
+//  1. Cookie auth: userid + token cookies. Look up user by id, verify
+//     user.AuthToken == token. (Constant-time string comparison via
+//     subtle.ConstantTimeCompare so a bad token doesn't leak via
+//     timing-side-channel.)
+//  2. Authentik header (only when cfg.TraefikAuthentik): trim
+//     X-Authentik-Username, look up case-insensitive; auto-create the
+//     user with the "Unassigned" group + usertype=External if missing.
+//
+// Both miss → 401. Errors during auto-create also surface as 401 +
+// log line, never a 5xx (nginx will retry on the next request).
+func (h *Auth) DropletConnect(w http.ResponseWriter, r *http.Request) {
+	if h.dropletConnectViaCookie(r) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if h.Cfg != nil && h.Cfg.TraefikAuthentik {
+		if h.dropletConnectViaAuthentik(r) {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+	log.Warn("Droplet connection authentication failed - no valid cookie or header authentication")
+	w.WriteHeader(http.StatusUnauthorized)
+}
+
+// dropletConnectViaCookie checks the userid + token cookies; mirrors
+// auth.py:197-206. Returns true on a positive match.
+func (h *Auth) dropletConnectViaCookie(r *http.Request) bool {
+	uid := cookieValue(r, auth.CookieUserID)
+	tok := cookieValue(r, auth.CookieToken)
+	if uid == "" || tok == "" {
+		return false
+	}
+	user, err := h.Users.Get(uid)
+	if err != nil {
+		log.Error("DropletConnect cookie lookup: %s", err)
+		return false
+	}
+	if user == nil || !constantTimeEqual(user.AuthToken, tok) {
+		log.Warn("Cookie authentication failed for droplet connection - invalid user or token")
+		return false
+	}
+	log.Info("Droplet connection authenticated via cookie for user: %s", user.Username)
+	return true
+}
+
+// dropletConnectViaAuthentik checks X-Authentik-Username; mirrors
+// auth.py:209-228. Returns true after either finding or creating the user.
+func (h *Auth) dropletConnectViaAuthentik(r *http.Request) bool {
+	username := strings.TrimSpace(r.Header.Get(auth.HeaderAuthentikUsername))
+	if username == "" {
+		log.Warn("Header authentication attempted for droplet connection but X-Authentik-Username header is missing or empty")
+		return false
+	}
+
+	user, err := h.Users.GetByUsernameLower(username)
+	if err != nil {
+		log.Error("DropletConnect header lookup: %s", err)
+		return false
+	}
+	if user != nil {
+		log.Info("Droplet connection authenticated via header for user: %s", user.Username)
+		return true
+	}
+
+	// Auto-create — same path as check_external_identity at
+	// auth.py:218-225.
+	created, err := auth.CreateExternalUser(username, h.Users, h.Groups)
+	if err != nil {
+		log.Error("Failed to create external user %s for droplet connection: %s", username, err)
+		return false
+	}
+	log.Info("Created and authenticated external user %s for droplet connection", created.Username)
+	return true
+}
+
+// cookieValue returns the named cookie's value, or "" if missing.
+func cookieValue(r *http.Request, name string) string {
+	c, err := r.Cookie(name)
+	if err != nil {
+		return ""
+	}
+	return c.Value
+}
+
+// constantTimeEqual compares two strings in constant time. Wraps
+// crypto/subtle.ConstantTimeCompare; returns false when lengths
+// differ (subtle returns 0 in that case). Used by the cookie auth
+// path so a malicious caller can't time-side-channel the auth_token.
+func constantTimeEqual(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtleConstantTimeCompare([]byte(a), []byte(b)) == 1
+}

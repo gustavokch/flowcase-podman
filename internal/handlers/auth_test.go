@@ -79,6 +79,7 @@ func newAuthFixture(t *testing.T, cfg *config.Config) *authFixture {
 	mux.HandleFunc("/", a.Index)
 	mux.HandleFunc("/login", a.Login)
 	mux.HandleFunc("/logout", a.Logout)
+	mux.HandleFunc("/droplet_connect", a.DropletConnect)
 	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("dashboard ok"))
 	})
