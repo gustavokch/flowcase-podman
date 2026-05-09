@@ -23,7 +23,6 @@ import (
 type authFixture struct {
 	t        *testing.T
 	dbx      *sqlx.DB
-	mgr      *Sessioner
 	users    *models.UsersRepo
 	groups   *models.GroupsRepo
 	insts    *models.InstancesRepo
@@ -32,22 +31,6 @@ type authFixture struct {
 	password string
 	user     *models.User
 }
-
-// Sessioner is a tiny alias to keep the test signatures readable.
-type Sessioner = sessionMgr
-
-type sessionMgr = scsManager
-type scsManager = stubSCSAlias
-
-// stubSCSAlias makes the file compile without re-exporting scs from
-// here. We just want a *scs.SessionManager value; bring it in below.
-type stubSCSAlias = struct{}
-
-// (the actual *scs.SessionManager comes from authpkg.NewSessionManager;
-// we don't need a wrapper.)
-//
-// The aliases above are placeholders to keep the doc/struct ergonomic;
-// the real fixture uses authpkg.NewSessionManager directly.
 
 func newAuthFixture(t *testing.T, cfg *config.Config) *authFixture {
 	t.Helper()
@@ -195,7 +178,10 @@ func TestIndexShowsFlashErrorAfterFailedLogin(t *testing.T) {
 	}
 
 	// Subsequent /index render should NOT re-show the flash (one-shot).
-	resp2, _ := client.Get(f.srv.URL + "/")
+	resp2, err := client.Get(f.srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
 	defer resp2.Body.Close()
 	body2 := readBody(t, resp2)
 	if strings.Contains(body2, "Invalid username or password") {
@@ -361,7 +347,10 @@ func TestLogoutDeletesUsersInstances(t *testing.T) {
 
 	postLogin(t, client, f.srv.URL, f.user.Username, f.password, false)
 
-	resp, _ := client.Get(f.srv.URL + "/logout")
+	resp, err := client.Get(f.srv.URL + "/logout")
+	if err != nil {
+		t.Fatalf("GET /logout: %v", err)
+	}
 	defer resp.Body.Close()
 
 	rows, err := f.auth.Instances.ListByUserID(f.user.ID)

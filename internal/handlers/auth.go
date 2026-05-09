@@ -14,7 +14,6 @@ import (
 	"github.com/flowcase/flowcase/internal/log"
 	"github.com/flowcase/flowcase/internal/models"
 	"github.com/flowcase/flowcase/internal/nginx"
-	"github.com/flowcase/flowcase/internal/permissions"
 )
 
 // flashErrorKey is where Index flash errors live in the scs session.
@@ -260,42 +259,5 @@ func lookupUsername(users *models.UsersRepo, uid string) string {
 	return uid
 }
 
-// permissionsCheck returns the user's permission map as a
-// CurrentUserView, used by the dashboard handler (T3.7+) but
-// declared here so all auth-related view-model construction stays
-// next to where the user record gets loaded.
-//
-// Returns nil if the user is missing or the permissions check fails.
-func (h *Auth) permissionsCheck(ctx context.Context, user *models.User) *CurrentUserView {
-	v := &CurrentUserView{
-		ID:       user.ID,
-		Username: user.Username,
-		Groups:   user.GroupIDs(),
-	}
-	checks := []struct {
-		out  *bool
-		perm permissions.Permission
-	}{
-		{&v.PermAdminPanel, permissions.AdminPanel},
-		{&v.PermViewInstances, permissions.ViewInstances},
-		{&v.PermEditInstances, permissions.EditInstances},
-		{&v.PermViewUsers, permissions.ViewUsers},
-		{&v.PermEditUsers, permissions.EditUsers},
-		{&v.PermViewDroplets, permissions.ViewDroplets},
-		{&v.PermEditDroplets, permissions.EditDroplets},
-		{&v.PermViewRegistry, permissions.ViewRegistry},
-		{&v.PermEditRegistry, permissions.EditRegistry},
-		{&v.PermViewGroups, permissions.ViewGroups},
-		{&v.PermEditGroups, permissions.EditGroups},
-	}
-	for _, c := range checks {
-		ok, err := permissions.Check(h.Users, h.Groups, user.ID, c.perm)
-		if err != nil {
-			log.Error("permissions.Check(%s, %s): %s", user.ID, c.perm, err)
-			return nil
-		}
-		*c.out = ok
-	}
-	_ = ctx // reserved for future request-scoped checks
-	return v
-}
+// (permissionsCheck helper deferred to T3.7's dashboard handler so
+//  golangci-lint's `unused` doesn't trip on the orphan helper here.)
