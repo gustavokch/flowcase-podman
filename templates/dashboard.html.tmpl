@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="icon" href="/favicon.ico">
+        <title>Flowcase - Dashboard</title>
+
+        <link rel="stylesheet" href="/static/css/base.css">
+        <link rel="stylesheet" href="/static/css/dashboard.css">
+
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.1/css/all.min.css">
+
+        <!-- User Information -->
+        <script>
+            var userInfo = {
+                "id": "{{ .CurrentUser.ID }}",
+                "username": "{{ .CurrentUser.Username }}",
+                "groups": [
+                    {{ range .CurrentUser.Groups }}
+                        "{{ . }}",
+                    {{ end }}
+                ],
+                "permissions": {
+                    "perm_admin_panel": {{ if .CurrentUser.PermAdminPanel }}true{{ else }}false{{ end }},
+                    "perm_view_instances": {{ if .CurrentUser.PermViewInstances }}true{{ else }}false{{ end }},
+                    "perm_edit_instances": {{ if .CurrentUser.PermEditInstances }}true{{ else }}false{{ end }},
+                    "perm_view_users": {{ if .CurrentUser.PermViewUsers }}true{{ else }}false{{ end }},
+                    "perm_edit_users": {{ if .CurrentUser.PermEditUsers }}true{{ else }}false{{ end }},
+                    "perm_view_droplets": {{ if .CurrentUser.PermViewDroplets }}true{{ else }}false{{ end }},
+                    "perm_edit_droplets": {{ if .CurrentUser.PermEditDroplets }}true{{ else }}false{{ end }},
+                    "perm_view_registry": {{ if .CurrentUser.PermViewRegistry }}true{{ else }}false{{ end }},
+                    "perm_edit_registry": {{ if .CurrentUser.PermEditRegistry }}true{{ else }}false{{ end }},
+                    "perm_view_groups": {{ if .CurrentUser.PermViewGroups }}true{{ else }}false{{ end }},
+                    "perm_edit_groups": {{ if .CurrentUser.PermEditGroups }}true{{ else }}false{{ end }},
+                }
+            };
+        </script>
+    </head>
+
+    <body>
+        <div class="container">
+            <nav class="nav">
+                <h1>Flowcase</h1>
+
+                <div class="nav-links">
+                    {{ if .CurrentUser.PermAdminPanel }}
+                    <a href="#" onclick="OpenAdminPanel()"><i class="fas fa-cogs"></i> Admin</a>
+                    {{ end }}
+                    <a href="#" class="user-link"><i class="fas fa-user"></i> {{ .CurrentUser.Username }}</a>
+                    <div class="user-dropdown">
+                        <a href="/logout"><i class="fas fa-sign-out-alt"></i>Logout</a>
+                    </div>
+                </div>
+            </nav>
+            <div class="content">
+                <div class="main">
+                </div>
+            </div>
+        </div>
+
+        <div class="droplet-instances">
+        </div>
+
+        <div class="notifications">
+        </div>
+
+        <div class="modal" id="modal">
+            <div class="modal-content">
+                <h2 id="model-header"></h2>
+                <p id="model-subtext"></p>
+                <div class="modal-buttons">
+                    <button id="model-accept" class="button-1-full">Launch</button>
+                    <button id="model-reject" class="button-1">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        {{ if .CurrentUser.PermAdminPanel }}
+        <div class="admin-modal" id="admin-modal">
+            <div class="admin-modal-content">
+                <button class="admin-modal-sidebar-toggle" onclick="toggleAdminSidebar()">
+                    <i class="fas fa-bars"></i>
+                </button>
+
+                <i class="fas fa-times admin-modal-close" onclick="CloseAdminPanel()"></i>
+
+                <div class="admin-modal-sidebar">
+                    <a href="#" class="admin-modal-sidebar-button" onclick="AdminChangeTab('system', this)">
+                        <i class="fas fa-cogs"></i>System
+                    </a>
+                    {{ if .CurrentUser.PermViewUsers }}
+                    <a href="#" class="admin-modal-sidebar-button" onclick="AdminChangeTab('users', this)">
+                        <i class="fas fa-user"></i>Users
+                    </a>
+                    {{ end }}
+                    {{ if .CurrentUser.PermViewGroups }}
+                    <a href="#" class="admin-modal-sidebar-button" onclick="AdminChangeTab('groups', this)">
+                        <i class="fas fa-users"></i>Groups
+                    </a>
+                    {{ end }}
+                    {{ if .CurrentUser.PermViewDroplets }}
+                    <a href="#" class="admin-modal-sidebar-button" onclick="AdminChangeTab('droplets', this)">
+                        <i class="fas fa-server"></i>Droplets
+                    </a>
+                    <a href="#" class="admin-modal-sidebar-button" onclick="AdminChangeTab('images', this)">
+                        <i class="fas fa-download"></i>Images
+                    </a>
+                    {{ end }}
+                    {{ if .CurrentUser.PermViewRegistry }}
+                    <a href="#" class="admin-modal-sidebar-button" onclick="AdminChangeTab('registry', this)">
+                        <i class="fas fa-database"></i>Registry
+                    </a>
+                    {{ end }}
+                    {{ if .CurrentUser.PermViewInstances }}
+                    <a href="#" class="admin-modal-sidebar-button" onclick="AdminChangeTab('instances', this)">
+                        <i class="fas fa-desktop"></i>Instances
+                    </a>
+                    {{ end }}
+                    <a href="#" class="admin-modal-sidebar-button" onclick="AdminChangeTab('logs', this)">
+                        <i class="fas fa-history"></i>Logs
+                    </a>
+                </div>
+
+                <div class="admin-modal-main">
+                    <h2 id="admin-modal-header"></h2>
+                    <p id="admin-modal-subtext"></p>
+
+                    <div class="admin-modal-main-content">
+                    </div>
+                </div>
+            </div>
+        </div>
+        {{ end }}
+    </body>
+    <script>
+        //user dropdown
+        document.querySelectorAll('.user-link')[0].addEventListener('click', () => {
+            document.querySelectorAll('.user-dropdown')[0].classList.toggle('active');
+        });
+    </script>
+    <script>
+        //Retrieve stats/droplets/instances from the server and update the UI
+
+        function GetDroplets()
+        {
+            var url = "/api/droplets";
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", url, true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === 4) {
+                    var json = JSON.parse(xhr.responseText);
+                    if (json["success"] == true) {
+                        UpdateDroplets(json);
+                    }
+                    else
+                    {
+                        if (json["error"] != null) {
+                            CreateNotification(json["error"], "error");
+                        }
+                        else {
+                            CreateNotification("An error occurred while retrieving the droplets. Please try again later.", "error");
+                        }
+                    }
+                }
+            };
+            xhr.send();
+
+            console.log("Retrieving droplets...");
+        }
+
+        function UpdateDroplets(json)
+        {
+            var mainDiv = document.querySelectorAll('.main')[0];
+            mainDiv.innerHTML = "";
+
+            json["droplets"].forEach(droplet => {
+                mainDiv.innerHTML += `
+                <div class="droplet" onclick="OpenDropletModal('${droplet.id}', '${droplet.display_name}', '${droplet.description ? droplet.description : ""}')">
+                    <img class="droplet-image" src="${droplet.image_path ? droplet.image_path : '/static/img/droplet_default.jpg'}" alt="${droplet.display_name}">
+                    <div class="card-content">
+                        <p class="droplet-title">${droplet.display_name}</p>
+                    </div>
+                </div>
+                `;
+            });
+
+            if (json["droplets"].length == 0) {
+                mainDiv.innerHTML = `
+                <div class="no-droplets">
+                    <h2>No droplets available.</h2>
+                    {{ if and .CurrentUser.PermAdminPanel .CurrentUser.PermEditDroplets .CurrentUser.PermViewRegistry }}
+                        <p>Would you like to add some from the registry?</p>
+                        <button class="button-1" onclick="OpenAdminPanel(); AdminChangeTab('registry');">View Registry</button>
+                    {{ end }}
+                </div>
+                `;
+            }
+        }
+
+        function GetInstances()
+        {
+            var url = "/api/instances";
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", url, true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === 4) {
+                    var json = JSON.parse(xhr.responseText);
+                    if (json["success"] == true) {
+                        UpdateInstances(json);
+                    }
+                    else
+                    {
+                        if (json["error"] != null) {
+                            CreateNotification(json["error"], "error");
+                        }
+                        else {
+                            CreateNotification("An error occurred while retrieving the instances. Please try again later.", "error");
+                        }
+                    }
+                }
+            };
+            xhr.send();
+
+            console.log("Retrieving instances...");
+        }
+
+        function UpdateInstances(json)
+        {
+            var instancesDiv = document.querySelectorAll('.droplet-instances')[0];
+            instancesDiv.innerHTML = "";
+
+            //set div to hidden if no instances
+            if (json["instances"].length == 0) {
+                instancesDiv.style.display = "none";
+
+                document.querySelectorAll('.container')[0].style.marginBottom = "0";
+            } else {
+                instancesDiv.style.display = "flex";
+
+                document.querySelectorAll('.container')[0].style.marginBottom = "162px";
+            }
+
+            json["instances"].forEach(instance => {
+                instancesDiv.innerHTML += `
+                <div class="droplet-instance" data-id="${instance.id}">
+
+                    <div class="droplet-instance-popup" data-id="${instance.id}">
+                        <p class="droplet-instance-popup-title">${instance.droplet.display_name}</p>
+                        <img src="/desktop/${instance.id}/vnc/api/get_screenshot?width=256" alt="" class="droplet-instance-popup-screenshot">
+                        <div class="droplet-instance-popup-buttons">
+                            <p class="droplet-instance-popup-connect" onclick="window.location.href='/droplet/${instance.id}'">Connect</p>
+                            <p class="droplet-instance-popup-destroy" onclick="RequestDestroyInstance('${instance.id}')">Destroy</p>
+                        </div>
+                    </div>
+
+                    <img src="${instance.droplet.image_path ? instance.droplet.image_path : '/static/img/droplet_default.jpg'}"}" alt="${instance.droplet.display_name}" class="droplet-instance-image droplet-image" onclick="ToggleInstancePopup('${instance.id}')">
+
+                </div>
+                `;
+            });
+        }
+
+        function UpdateAll()
+        {
+            console.log("Updating all... Time: " + new Date().toLocaleTimeString());
+            GetDroplets();
+            GetInstances();
+        }
+
+        window.onload = function() {
+            UpdateAll();
+
+            setTimeout(() => {
+                document.body.classList.add('active');
+            }, 100);
+        }
+
+        //if the page is restored, reload the page
+        window.addEventListener( "pageshow", function ( event ) {
+            var historyTraversal = event.persisted || ( typeof window.performance != "undefined" && window.performance.navigation.type === 2 );
+            if ( historyTraversal ) {
+                window.location.reload();
+            }
+        });
+
+        setInterval(UpdateAll, 30000);
+    </script>
+    <script>
+        //Droplet modal
+
+        const droplets = document.querySelectorAll('.droplet');
+        const modal = document.getElementById('modal');
+        const accept = document.getElementById('model-accept');
+        const reject = document.getElementById('model-reject');
+
+        const header = document.getElementById('model-header');
+        const subtext = document.getElementById('model-subtext');
+
+        currentDropletID = null;
+
+        function OpenDropletModal(dropletID, displayName, description)
+        {
+            ResetModalButtons();
+
+            currentDropletID = dropletID;
+
+            header.innerText = displayName;
+            subtext.innerText = description;
+
+            modal.classList.add('active');
+        }
+
+        accept.addEventListener('click', () => {
+            accept.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Launching...'
+            accept.disabled = true;
+            reject.disabled = true;
+
+            RequestNewInstance(currentDropletID);
+        });
+
+        reject.addEventListener('click', () => {
+            modal.classList.remove('active');
+        });
+
+        modal.addEventListener('click', () => {
+            if (!reject.disabled)
+            {
+                modal.classList.remove('active');
+            }
+        });
+
+        modal.querySelector('.modal-content').addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+
+        function ResetModalButtons() {
+            accept.innerHTML = 'Launch';
+            accept.disabled = false;
+            reject.disabled = false;
+        }
+    </script>
+    <script>
+        //Droplet instance popup
+        function ToggleInstancePopup(instanceID)
+        {
+            //Hide all other popups
+            var popups = document.querySelectorAll('.droplet-instance-popup');
+            popups.forEach(popup => {
+                if (popup.dataset.id != instanceID) {
+                    popup.classList.remove('active');
+                }
+            });
+
+            //Toggle the popup
+            var popup = document.querySelector('.droplet-instance-popup[data-id="' + instanceID + '"]');
+            popup.classList.toggle('active');
+        }
+    </script>
+    <script>
+        function RequestNewInstance(dropletID)
+        {
+            var url = "/api/instance/request";
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", url, true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === 4) {
+                    var json = JSON.parse(xhr.responseText);
+                    if (json["success"] == true) {
+                        window.location.href = "/droplet/" + json["instance_id"];
+                    }
+                    else
+                    {
+                        ResetModalButtons();
+                        if (json["error"] != null) {
+                            CreateNotification(json["error"], "error");
+                        }
+                        else {
+                            CreateNotification("An error occurred while requesting a new instance. Please try again later.", "error");
+                        }
+                    }
+                }
+            };
+            var data = JSON.stringify({"droplet_id": dropletID, "resolution": window.innerWidth + "x" + window.innerHeight});
+            xhr.send(data);
+
+            console.log("Requesting new instance for droplet " + dropletID + "...");
+        }
+
+        function RequestDestroyInstance(instanceID)
+        {
+            if (!confirm("Are you sure you want to destroy this instance?")) {
+                return;
+            }
+
+            var url = "/api/instance/" + instanceID + "/destroy";
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", url, true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === 4) {
+                    var json = JSON.parse(xhr.responseText);
+                    if (json["success"] == true) {
+                        //Update instances
+                        GetInstances();
+                        CreateNotification("Instance destroyed successfully.", "success");
+                    }
+                    else
+                    {
+                        if (json["error"] != null) {
+                            CreateNotification(json["error"], "error");
+                        }
+                        else {
+                            CreateNotification("An error occurred while destroying the instance. Please try again later.", "error");
+                        }
+                    }
+                }
+            };
+            xhr.send();
+
+            console.log("Requesting to destroy instance " + instanceID + "...");
+        }
+
+        function CreateNotification(message, type = "info")
+        {
+            console.log(type.toUpperCase() + ": " + message);
+            var notifications = document.querySelector('.notifications');
+            var notification = document.createElement('div');
+            notification.classList.add('notification');
+            notification.innerHTML = `
+                <h3 class="notification-title">${type.charAt(0).toUpperCase() + type.slice(1)}</h3>
+                <p class="notification-message">${message}</p>
+            `;
+            notifications.appendChild(notification);
+
+            notification.classList.add(type);
+
+            setTimeout(() => {
+                notification.classList.add('active');
+            }, 10);
+            setTimeout(() => {
+                notification.classList.remove('active');
+            }, 4800);
+
+            notification.addEventListener('click', () => {
+                notification.classList.remove('active');
+
+                setTimeout(() => {
+                    notification.remove();
+                }, 200);
+            });
+
+            setTimeout(() => {
+                notification.remove();
+            }, 5000);
+        }
+    </script>
+    {{ if .CurrentUser.PermAdminPanel }}
+    <script src="/static/js/dashboard/admin.js"></script>
+    {{ end }}
+</html>

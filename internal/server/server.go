@@ -58,7 +58,7 @@ func New(opts Options) (*Server, error) {
 
 	s := &Server{opts: opts}
 
-	tmplPath := filepath.Join(opts.TemplateDir, "404.html")
+	tmplPath := filepath.Join(opts.TemplateDir, "404.html.tmpl")
 	tmpl, err := template.ParseFiles(tmplPath)
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", tmplPath, err)

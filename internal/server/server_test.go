@@ -33,7 +33,7 @@ func fixtureFS(t *testing.T) (staticDir, templateDir, favicon string) {
 		t.Fatalf("mkdir templates: %v", err)
 	}
 	const tmpl404 = "<html><body><h1>404</h1>page not found</body></html>"
-	if err := os.WriteFile(filepath.Join(templateDir, "404.html"), []byte(tmpl404), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(templateDir, "404.html.tmpl"), []byte(tmpl404), 0o644); err != nil {
 		t.Fatalf("write 404 template: %v", err)
 	}
 

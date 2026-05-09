@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<link rel="icon" href="/favicon.ico">
+		<title>Flowcase</title>
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+		<link rel="stylesheet" type="text/css" href="/static/css/base.css">
+		<link rel="stylesheet" type="text/css" href="/static/css/droplet.css">
+
+		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.1/css/all.min.css">
+
+		<script src="/static/dropzone/dropzone.min.js"></script>
+		<link rel="stylesheet" href="/static/dropzone/dropzone.min.css">
+
+		<!-- Droplet Information -->
+		<script>
+			var instanceInfo = {
+				"id": "{{ .InstanceID }}",
+				"guac_token": "{{ .GuacToken }}",
+				"droplet": {
+					"id": "{{ .Droplet.ID }}",
+					"display_name": "{{ .Droplet.DisplayName }}",
+					"droplet_type": "{{ .Droplet.DropletType }}",
+					"image_path": "{{ .Droplet.ImagePath }}",
+				}
+			};
+		</script>
+
+	</head>
+	<body>
+
+		<div class="sidebar">
+			<div class="sidebar-main">
+				<i class="fa fa-times sidebar-close" onclick="toggleSidebar()"></i>
+				<div class="sidebar-header">
+					<h1>Control Panel</h1>
+				</div>
+				<hr>
+				<div class="sidebar-content">
+
+					<div class="sidebar-button" onclick="FullscreenButton()">
+						<i class="fa fa-expand"></i>
+						<p>Fullscreen</p>
+
+						<div class="sidebar-input">
+							<i class="fa" id="control-fullscreen-check"></i>
+							<input type="checkbox" id="control-fullscreen" hidden>
+						</div>
+					</div>
+
+					{{ if not .Guacamole }}
+
+					<div class="sidebar-button" onclick="ToggleAudioButton()">
+						<i class="fa fa-volume-up"></i>
+						<p>Audio</p>
+
+						<div class="sidebar-input">
+							<i class="fa" id="control-audio-check"></i>
+							<input type="checkbox" id="control-audio" hidden>
+						</div>
+					</div>
+
+					<div class="sidebar-button" onclick="ToggleDownloadSection()">
+						<i class="fa fa-download"></i>
+						<p>Downloads</p>
+					</div>
+
+					<div class="sidebar-section" id="download-section">
+					</div>
+
+					<div class="sidebar-button" onclick="ToggleUploadSection()">
+						<i class="fa fa-upload"></i>
+						<p>Upload</p>
+					</div>
+
+					<div class="sidebar-section" id="upload-section">
+						<form action="/desktop/{{ .InstanceID }}/uploads/upload" class="dropzone" id="upload-section-main"></form>
+					</div>
+
+					<div class="sidebar-button" onclick="DisplayButton()">
+						<i class="fa fa-desktop"></i>
+						<p>Displays</p>
+					</div>
+
+					<div class="sidebar-button">
+						<i class="fa fa-image"></i>
+						<p>Stream Quality</p>
+
+						<div class="sidebar-input">
+							<select name="Quality" id="control-quality-select">
+								<option value="0">Static</option>
+								<option value="1">Low</option>
+								<option value="2">Medium</option>
+								<option value="3">High</option>
+								<option value="4">Extreme</option>
+							</select>
+						</div>
+					</div>
+
+					<div class="sidebar-button" onclick="GameModeButton()">
+						<i class="fa fa-gamepad"></i>
+						<p>Game Mode</p>
+
+						<div class="sidebar-input">
+							<i class="fa" id="control-game-mode-check"></i>
+							<input type="checkbox" id="control-game-mode" hidden>
+						</div>
+					</div>
+
+					{{ end }}
+
+					<div class="sidebar-button" onclick="DashboardButton()">
+						<i class="fa fa-home"></i>
+						<p>Dashboard</p>
+					</div>
+
+					<div class="sidebar-button" id="control-destroy-instance" onclick="DestroyDropletButton()">
+						<i class="fa fa-trash"></i>
+						<p>Destroy Droplet</p>
+					</div>
+
+				</div>
+			</div>
+			<div class="sidebar-handle" id="sidebar-handle">
+				<p class="sidebar-handle-icon">></p>
+			</div>
+		</div>
+
+		<div id="loading-screen" class="loading-screen">
+			<div class="loading-screen-content">
+				<img src="{{ if .Droplet.ImagePath }}{{ .Droplet.ImagePath }}{{ else }}/static/img/droplet_default.jpg{{ end }}" id="loading-screen-image">
+				<h1 id="loading-screen-name">{{ .Droplet.DisplayName }}</h1>
+				<p id="loading-screen-status">Starting...</p>
+			</div>
+		</div>
+
+		<iframe id="iframe-id" allow="autoplay; clipboard-read; clipboard-write;"></iframe>
+	</body>
+	<script src="/static/js/jsmpeg.min.js"></script>
+	<script src="/static/js/droplet/main.js"></script>
+	<script src="/static/js/droplet/control_panel.js"></script>
+	<script src="/static/js/droplet/loading_screen.js"></script>
+</html>
