@@ -15,6 +15,7 @@ import (
 	"github.com/flowcase/flowcase/internal/log"
 	"github.com/flowcase/flowcase/internal/models"
 	"github.com/flowcase/flowcase/internal/nginx"
+	"github.com/flowcase/flowcase/internal/permissions"
 )
 
 // subtleConstantTimeCompare is a tiny indirection so the import name
@@ -263,6 +264,81 @@ func lookupUsername(users *models.UsersRepo, uid string) string {
 		return u.Username
 	}
 	return uid
+}
+
+// Dashboard handles GET /dashboard. Mirrors auth.py:114-117.
+//
+// Login-required: redirect to / when the session has no user. With
+// a logged-in user we load the user row, build the
+// CurrentUserView (precomputed permissions + comma-split groups),
+// and render dashboard.html.tmpl.
+func (h *Auth) Dashboard(w http.ResponseWriter, r *http.Request) {
+	uid := auth.GetUserID(r.Context(), h.Sessions)
+	if uid == "" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	user, err := h.Users.Get(uid)
+	if err != nil {
+		log.Error("Dashboard user lookup: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if user == nil {
+		// Stale session — user was deleted but cookie lingered.
+		_ = auth.Destroy(r.Context(), h.Sessions)
+		auth.ClearIdentityCookies(w)
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
+	view := h.currentUserView(r.Context(), user)
+	if view == nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := h.Templates.Render(w, "dashboard.html.tmpl", DashboardData{CurrentUser: *view}); err != nil {
+		log.Error("rendering dashboard: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+// currentUserView builds the precomputed CurrentUserView the
+// dashboard template renders. Returns nil on permissions.Check error;
+// the caller surfaces a 5xx since something internal is broken.
+func (h *Auth) currentUserView(ctx context.Context, user *models.User) *CurrentUserView {
+	v := &CurrentUserView{
+		ID:       user.ID,
+		Username: user.Username,
+		Groups:   user.GroupIDs(),
+	}
+	checks := []struct {
+		out  *bool
+		perm permissions.Permission
+	}{
+		{&v.PermAdminPanel, permissions.AdminPanel},
+		{&v.PermViewInstances, permissions.ViewInstances},
+		{&v.PermEditInstances, permissions.EditInstances},
+		{&v.PermViewUsers, permissions.ViewUsers},
+		{&v.PermEditUsers, permissions.EditUsers},
+		{&v.PermViewDroplets, permissions.ViewDroplets},
+		{&v.PermEditDroplets, permissions.EditDroplets},
+		{&v.PermViewRegistry, permissions.ViewRegistry},
+		{&v.PermEditRegistry, permissions.EditRegistry},
+		{&v.PermViewGroups, permissions.ViewGroups},
+		{&v.PermEditGroups, permissions.EditGroups},
+	}
+	for _, c := range checks {
+		ok, err := permissions.Check(h.Users, h.Groups, user.ID, c.perm)
+		if err != nil {
+			log.Error("permissions.Check(%s, %s): %s", user.ID, c.perm, err)
+			return nil
+		}
+		*c.out = ok
+	}
+	_ = ctx
+	return v
 }
 
 // DropletConnect handles GET /droplet_connect. Mirrors auth.py:190-232.

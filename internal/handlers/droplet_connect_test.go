@@ -37,7 +37,10 @@ func TestDropletConnectCookieWrongTokenIs401(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: authpkg.CookieUserID, Value: f.user.ID})
 	req.AddCookie(&http.Cookie{Name: authpkg.CookieToken, Value: "completely-wrong"})
 
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
@@ -52,7 +55,10 @@ func TestDropletConnectCookieMissingUserIs401(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: authpkg.CookieUserID, Value: "no-such-user"})
 	req.AddCookie(&http.Cookie{Name: authpkg.CookieToken, Value: "any"})
 
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
@@ -123,7 +129,10 @@ func TestDropletConnectAuthentikHeaderReusesExistingUser(t *testing.T) {
 	req, _ := http.NewRequest("GET", f.srv.URL+"/droplet_connect", nil)
 	req.Header.Set(authpkg.HeaderAuthentikUsername, "ALICE")
 
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
@@ -144,7 +153,10 @@ func TestDropletConnectAuthentikHeaderEmpty(t *testing.T) {
 	req, _ := http.NewRequest("GET", f.srv.URL+"/droplet_connect", nil)
 	req.Header.Set(authpkg.HeaderAuthentikUsername, "   ") // whitespace
 
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("whitespace header should 401, got %d", resp.StatusCode)
@@ -161,7 +173,10 @@ func TestDropletConnectAuthentikDisabledIgnoresHeader(t *testing.T) {
 	req, _ := http.NewRequest("GET", f.srv.URL+"/droplet_connect", nil)
 	req.Header.Set(authpkg.HeaderAuthentikUsername, "alice")
 
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 (header path off when not Authentik)", resp.StatusCode)
@@ -176,7 +191,10 @@ func TestDropletConnectCookieSuccessIsBodyEmpty(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: authpkg.CookieUserID, Value: f.user.ID})
 	req.AddCookie(&http.Cookie{Name: authpkg.CookieToken, Value: f.user.AuthToken})
 
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp.Body.Close()
 
 	body := readBody(t, resp)
