@@ -157,8 +157,25 @@ func TestCleanupOrphansRemovesUnknownAndRestartsKnown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspect known: %v", err)
 	}
-	if err := dx.Raw().ContainerStop(ctx, insp.ID, container.StopOptions{}); err != nil {
+	timeoutSec := 0 // 0 -> SIGKILL immediately, no graceful wait
+	if err := dx.Raw().ContainerStop(ctx, insp.ID, container.StopOptions{Timeout: &timeoutSec}); err != nil {
 		t.Fatalf("stop known: %v", err)
+	}
+	// Poll until the daemon actually reflects "exited" — ContainerStop
+	// may return before the state field is updated on slower hosts.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		insp2, err := dx.Raw().ContainerInspect(ctx, insp.ID)
+		if err != nil {
+			t.Fatalf("inspect known after stop: %v", err)
+		}
+		if insp2.State.Status != "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("known container never transitioned out of running: status=%q", insp2.State.Status)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	report, err := CleanupOrphans(ctx, dx, []string{knownID})
