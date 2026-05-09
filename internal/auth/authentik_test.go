@@ -11,14 +11,6 @@ import (
 	"github.com/flowcase/flowcase/internal/models"
 )
 
-type authentikFixture struct {
-	users  *models.UsersRepo
-	groups *models.GroupsRepo
-	mgr    interface{ /* opaque */ }
-	srv    *httptest.Server
-	cfg    auth.ExternalIdentityConfig
-}
-
 // authentikApp boots a minimal HTTP server whose `/` calls
 // CheckExternalIdentity and reflects the result back as text. The
 // scs cookie is auto-handled via mgr.LoadAndSave.
