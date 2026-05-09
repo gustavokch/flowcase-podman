@@ -22,6 +22,7 @@ type dropletAPIFixture struct {
 	users     *models.UsersRepo
 	groups    *models.GroupsRepo
 	droplets  *models.DropletsRepo
+	instances *models.InstancesRepo
 	srvURL    string
 	password  string
 	user      *models.User
@@ -70,17 +71,19 @@ func newDropletAPIFixture(t *testing.T) *dropletAPIFixture {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", a.Login)
 	mux.HandleFunc("/api/droplets", dh.List)
+	mux.HandleFunc("/api/instances", dh.ListInstances)
 
 	srv := httptest.NewServer(mgr.LoadAndSave(mux))
 	t.Cleanup(srv.Close)
 
 	return &dropletAPIFixture{
-		users:    users,
-		groups:   groups,
-		droplets: droplets,
-		srvURL:   srv.URL,
-		password: pw,
-		user:     u,
+		users:     users,
+		groups:    groups,
+		droplets:  droplets,
+		instances: insts,
+		srvURL:    srv.URL,
+		password:  pw,
+		user:      u,
 	}
 }
 

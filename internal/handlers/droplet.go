@@ -1,13 +1,17 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/alexedwards/scs/v2"
 
 	"github.com/flowcase/flowcase/internal/auth"
+	"github.com/flowcase/flowcase/internal/dockerx"
+	"github.com/flowcase/flowcase/internal/droplet"
 	"github.com/flowcase/flowcase/internal/log"
 	"github.com/flowcase/flowcase/internal/models"
 )
@@ -19,15 +23,24 @@ const AdminGroupName = "Admin"
 
 // Droplet holds dependencies for the /api/droplets and /api/instances
 // routes (plus the heavier /api/instance/* set in T3.10+).
+//
+// Docker is optional: when nil, the per-instance IP lookup at
+// /api/instances returns the FallbackIP "N/A" without surfacing a
+// 5xx, matching the legacy try/except at droplet.py:143-145 that
+// silently swallowed any container lookup error.
 type Droplet struct {
 	Sessions  *scs.SessionManager
 	Users     *models.UsersRepo
 	Groups    *models.GroupsRepo
 	Droplets  *models.DropletsRepo
 	Instances *models.InstancesRepo
+
+	Docker *dockerx.Client
 }
 
-// NewDroplet constructs a Droplet handler.
+// NewDroplet constructs a Droplet handler with Docker disabled. Tests
+// that don't need IP resolution use this; production wiring (cmd/
+// flowcase) sets Docker before calling List/Instances.
 func NewDroplet(
 	sess *scs.SessionManager,
 	users *models.UsersRepo,
@@ -42,6 +55,13 @@ func NewDroplet(
 		Droplets:  droplets,
 		Instances: instances,
 	}
+}
+
+// WithDocker returns a copy with the docker client attached.
+func (h *Droplet) WithDocker(dx *dockerx.Client) *Droplet {
+	out := *h
+	out.Docker = dx
+	return &out
 }
 
 // dropletAPI is the JSON shape for one droplet in the GET /api/droplets
@@ -181,6 +201,107 @@ func userCanSee(d models.Droplet, userGroups []string) bool {
 		}
 	}
 	return false
+}
+
+// instanceAPI is the JSON shape for one /api/instances entry. Mirrors
+// the legacy dict at droplet.py:147-165 byte-for-byte.
+type instanceAPI struct {
+	ID        string     `json:"id"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	IP        string     `json:"ip"`
+	Droplet   dropletAPI `json:"droplet"`
+}
+
+type instancesResponse struct {
+	Success   bool          `json:"success"`
+	Instances []instanceAPI `json:"instances"`
+}
+
+// ListInstances handles GET /api/instances. Mirrors droplet.py:109-167.
+//   - Login-required: 401 when scs has no user id.
+//   - Returns the user's own instances (ListByUserID).
+//   - Per instance: look up the droplet row, look up the container's
+//     IP via dockerx (FallbackIP "N/A" on any error / when Docker is
+//     unwired — matches the legacy try/except).
+func (h *Droplet) ListInstances(w http.ResponseWriter, r *http.Request) {
+	uid := auth.GetUserID(r.Context(), h.Sessions)
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, errResponse{Error: "Unauthorized"})
+		return
+	}
+
+	rows, err := h.Instances.ListByUserID(uid)
+	if err != nil {
+		log.Error("instances list: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+
+	resp := instancesResponse{
+		Success:   true,
+		Instances: make([]instanceAPI, 0, len(rows)),
+	}
+	for _, inst := range rows {
+		d, err := h.Droplets.Get(inst.DropletID)
+		if err != nil {
+			log.Error("instances droplet lookup %s: %s", inst.DropletID, err)
+			continue
+		}
+		if d == nil {
+			// Droplet row was deleted; skip the instance — same as the
+			// legacy code which would throw on droplet.id and the
+			// surrounding try/except would swallow.
+			continue
+		}
+
+		ip := h.lookupInstanceIP(r.Context(), inst.ID, d)
+		resp.Instances = append(resp.Instances, instanceAPI{
+			ID:        inst.ID,
+			CreatedAt: inst.CreatedAt,
+			UpdatedAt: inst.UpdatedAt,
+			IP:        ip,
+			Droplet:   dropletToAPI(d),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// lookupInstanceIP returns the per-instance container IP via the
+// droplet package's GetContainerIP, or FallbackIP when Docker is
+// unwired or the inspect fails (mirrors the legacy try/except wrap).
+func (h *Droplet) lookupInstanceIP(ctx context.Context, instanceID string, d *models.Droplet) string {
+	if h.Docker == nil {
+		return droplet.FallbackIP
+	}
+	insp, err := h.Docker.Raw().ContainerInspect(ctx,
+		droplet.ContainerNamePrefix+instanceID)
+	if err != nil {
+		// Container might not exist (instance row leaked, or
+		// orchestrator crashed mid-spawn). Match the legacy `pass`
+		// rather than 5xx-ing the whole list.
+		return droplet.FallbackIP
+	}
+	return droplet.GetContainerIP(insp, d)
+}
+
+// dropletToAPI projects a models.Droplet onto the JSON shape both
+// /api/droplets and the embedded `droplet` field on /api/instances
+// share.
+func dropletToAPI(d *models.Droplet) dropletAPI {
+	return dropletAPI{
+		ID:                      d.ID,
+		DisplayName:             d.DisplayName,
+		Description:             d.Description,
+		ImagePath:               d.ImagePath,
+		DropletType:             d.DropletType,
+		ContainerDockerImage:    d.ContainerDockerImage,
+		ContainerDockerRegistry: d.ContainerDockerRegistry,
+		ContainerCores:          d.ContainerCores,
+		ContainerMemory:         d.ContainerMemory,
+		ServerIP:                d.ServerIP,
+		ServerPort:              d.ServerPort,
+	}
 }
 
 // writeJSON sets Content-Type and serializes `body` as JSON. Errors
