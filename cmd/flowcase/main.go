@@ -69,6 +69,17 @@ func run(args []string) error {
 		defer dx.Close()
 	}
 
+	// Synchronous orphan-cleanup pass before serving traffic.
+	// Mirrors gunicorn.conf.py:50 cleanup_containers(temp_app):
+	// reconcile every flowcase_generated_* container against the
+	// instances we still have in the DB, removing strays and
+	// restarting stopped-but-known ones. Best-effort — failures
+	// log but don't block startup.
+	instancesRepo := models.NewInstancesRepo(dbx)
+	if err := cleanupOrphansAtStartup(dx, instancesRepo); err != nil {
+		log.Error("Error in container cleanup: %s", err)
+	}
+
 	// Background pull loop. Tied to the process lifetime via a
 	// context cancelled on return; in production this runs forever
 	// since http.ListenAndServe blocks until the process exits.
@@ -92,4 +103,44 @@ func run(args []string) error {
 	addr := ":" + strconv.Itoa(cfg.Port)
 	log.Info("HTTP listening on %s", addr)
 	return http.ListenAndServe(addr, srv.Handler())
+}
+
+// cleanupOrphansAtStartup runs droplet.CleanupOrphans against every
+// instance ID currently in the DB. Mirrors utils/docker.py:42-113 as
+// invoked from gunicorn.conf.py:50.
+//
+// dx == nil is a no-op with a single log line, matching the legacy
+// `if not docker_client: print("...skipping container cleanup")`
+// at utils/docker.py:44-46. instances == nil is treated the same way
+// rather than passing an empty slice, since "no DB" should not mean
+// "remove every flowcase container".
+//
+// Errors loading the instance list propagate so the caller can log
+// the failure as `Error in container cleanup` (legacy outer except).
+func cleanupOrphansAtStartup(dx *dockerx.Client, instances *models.InstancesRepo) error {
+	if dx == nil {
+		log.Info("No Docker client available, skipping container cleanup")
+		return nil
+	}
+	if instances == nil {
+		log.Info("No instances repo available, skipping container cleanup")
+		return nil
+	}
+
+	log.Info("Starting container cleanup and persistence check")
+
+	rows, err := instances.List()
+	if err != nil {
+		return fmt.Errorf("loading instances: %w", err)
+	}
+	known := make([]string, len(rows))
+	for i, r := range rows {
+		known[i] = r.ID
+	}
+	log.Info("Found %d active droplet instances in database", len(known))
+
+	if _, err := droplet.CleanupOrphans(context.Background(), dx, known); err != nil {
+		return fmt.Errorf("cleanup orphans: %w", err)
+	}
+	return nil
 }
