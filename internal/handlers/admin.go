@@ -425,6 +425,212 @@ func uuidNew() string {
 	return generateUUID()
 }
 
+// adminGroupView is one entry in the GET /api/admin/groups response.
+// Mirrors admin.py:469-487. The permissions are nested under
+// `permissions` and use the legacy short names (no `perm_` prefix in
+// the JSON keys, matching the response shape exactly).
+type adminGroupView struct {
+	ID          string             `json:"id"`
+	DisplayName string             `json:"display_name"`
+	Protected   bool               `json:"protected"`
+	Permissions adminGroupPermsBlk `json:"permissions"`
+}
+
+type adminGroupPermsBlk struct {
+	AdminPanel    bool `json:"admin_panel"`
+	ViewInstances bool `json:"view_instances"`
+	EditInstances bool `json:"edit_instances"`
+	ViewUsers     bool `json:"view_users"`
+	EditUsers     bool `json:"edit_users"`
+	ViewDroplets  bool `json:"view_droplets"`
+	EditDroplets  bool `json:"edit_droplets"`
+	ViewRegistry  bool `json:"view_registry"`
+	EditRegistry  bool `json:"edit_registry"`
+	ViewGroups    bool `json:"view_groups"`
+	EditGroups    bool `json:"edit_groups"`
+}
+
+type adminGroupsResponse struct {
+	Success bool             `json:"success"`
+	Groups  []adminGroupView `json:"groups"`
+}
+
+// ListGroups handles GET /api/admin/groups. Mirrors admin.py:456-489.
+// VIEW_GROUPS-gated.
+func (h *Admin) ListGroups(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.ViewGroups) {
+		return
+	}
+	all, err := h.Groups.List()
+	if err != nil {
+		log.Error("ListGroups: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	resp := adminGroupsResponse{
+		Success: true,
+		Groups:  make([]adminGroupView, 0, len(all)),
+	}
+	for _, g := range all {
+		resp.Groups = append(resp.Groups, adminGroupView{
+			ID:          g.ID,
+			DisplayName: g.DisplayName,
+			Protected:   g.Protected,
+			Permissions: adminGroupPermsBlk{
+				AdminPanel:    g.PermAdminPanel,
+				ViewInstances: g.PermViewInstances,
+				EditInstances: g.PermEditInstances,
+				ViewUsers:     g.PermViewUsers,
+				EditUsers:     g.PermEditUsers,
+				ViewDroplets:  g.PermViewDroplets,
+				EditDroplets:  g.PermEditDroplets,
+				ViewRegistry:  g.PermViewRegistry,
+				EditRegistry:  g.PermEditRegistry,
+				ViewGroups:    g.PermViewGroups,
+				EditGroups:    g.PermEditGroups,
+			},
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// adminGroupPayload is the body for POST /api/admin/group. The legacy
+// uses `perm_X`-prefixed flat keys, so the wire shape is flat too —
+// not the nested {permissions: {...}} block ListGroups returns. The
+// admin UI's serialization mirrors this asymmetry.
+type adminGroupPayload struct {
+	ID                string `json:"id"`
+	DisplayName       string `json:"display_name"`
+	PermAdminPanel    bool   `json:"perm_admin_panel"`
+	PermViewInstances bool   `json:"perm_view_instances"`
+	PermEditInstances bool   `json:"perm_edit_instances"`
+	PermViewUsers     bool   `json:"perm_view_users"`
+	PermEditUsers     bool   `json:"perm_edit_users"`
+	PermViewDroplets  bool   `json:"perm_view_droplets"`
+	PermEditDroplets  bool   `json:"perm_edit_droplets"`
+	PermViewRegistry  bool   `json:"perm_view_registry"`
+	PermEditRegistry  bool   `json:"perm_edit_registry"`
+	PermViewGroups    bool   `json:"perm_view_groups"`
+	PermEditGroups    bool   `json:"perm_edit_groups"`
+}
+
+// EditGroup handles POST /api/admin/group. Mirrors admin.py:491-566.
+// EDIT_GROUPS-gated. Creates a new group when id is empty/null/missing,
+// updates otherwise. Protected groups can't have their display name
+// changed.
+func (h *Admin) EditGroup(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.EditGroups) {
+		return
+	}
+
+	var p adminGroupPayload
+	if err := decodeJSON(r, &p); err != nil {
+		writeJSON(w, http.StatusBadRequest, errResponse{Error: "invalid JSON"})
+		return
+	}
+
+	if p.DisplayName == "" {
+		writeJSON(w, http.StatusBadRequest, errResponse{Error: "Display Name is required"})
+		return
+	}
+
+	createNew := p.ID == "" || p.ID == "null"
+	var g *models.Group
+	if !createNew {
+		existing, err := h.Groups.Get(p.ID)
+		if err != nil {
+			log.Error("EditGroup lookup: %s", err)
+			writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+			return
+		}
+		if existing == nil {
+			createNew = true
+		} else {
+			g = existing
+			if g.Protected && g.DisplayName != p.DisplayName {
+				writeJSON(w, http.StatusBadRequest,
+					errResponse{Error: "Cannot change display name of protected group"})
+				return
+			}
+		}
+	}
+	if createNew {
+		g = &models.Group{ID: uuidNew(), Protected: false}
+	}
+
+	g.DisplayName = p.DisplayName
+	g.PermAdminPanel = p.PermAdminPanel
+	g.PermViewInstances = p.PermViewInstances
+	g.PermEditInstances = p.PermEditInstances
+	g.PermViewUsers = p.PermViewUsers
+	g.PermEditUsers = p.PermEditUsers
+	g.PermViewDroplets = p.PermViewDroplets
+	g.PermEditDroplets = p.PermEditDroplets
+	g.PermViewRegistry = p.PermViewRegistry
+	g.PermEditRegistry = p.PermEditRegistry
+	g.PermViewGroups = p.PermViewGroups
+	g.PermEditGroups = p.PermEditGroups
+
+	if createNew {
+		if err := h.Groups.Create(g); err != nil {
+			log.Error("EditGroup Create: %s", err)
+			writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+			return
+		}
+	} else {
+		if err := h.Groups.Update(g); err != nil {
+			log.Error("EditGroup Update: %s", err)
+			writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, struct {
+		Success bool `json:"success"`
+	}{Success: true})
+}
+
+// DeleteGroup handles DELETE /api/admin/group. Mirrors admin.py:568-585.
+// EDIT_GROUPS-gated. 404 missing, 400 protected.
+func (h *Admin) DeleteGroup(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.EditGroups) {
+		return
+	}
+	var p struct {
+		ID string `json:"id"`
+	}
+	if err := decodeJSON(r, &p); err != nil {
+		writeJSON(w, http.StatusBadRequest, errResponse{Error: "invalid JSON"})
+		return
+	}
+
+	g, err := h.Groups.Get(p.ID)
+	if err != nil {
+		log.Error("DeleteGroup lookup: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	if g == nil {
+		writeJSON(w, http.StatusNotFound, errResponse{Error: "Group not found."})
+		return
+	}
+	if g.Protected {
+		writeJSON(w, http.StatusBadRequest,
+			errResponse{Error: "This group is protected. Protected groups cannot be deleted."})
+		return
+	}
+
+	if err := h.Groups.Delete(p.ID); err != nil {
+		log.Error("DeleteGroup Delete: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, struct {
+		Success bool `json:"success"`
+	}{Success: true})
+}
+
 // contains is a tiny linear-scan helper. Used by EditUser's
 // admin-group reattach path; the slice is small (≤ a few group IDs).
 func contains(haystack []string, needle string) bool {
