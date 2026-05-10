@@ -19,6 +19,7 @@ import (
 
 	"github.com/flowcase/flowcase/internal/auth"
 	"github.com/flowcase/flowcase/internal/dockerx"
+	dropletpkg "github.com/flowcase/flowcase/internal/droplet"
 	"github.com/flowcase/flowcase/internal/log"
 	"github.com/flowcase/flowcase/internal/models"
 	"github.com/flowcase/flowcase/internal/permissions"
@@ -1034,6 +1035,191 @@ func (h *Admin) DeleteDroplet(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.Droplets.Delete(p.ID); err != nil {
 		log.Error("DeleteDroplet Delete: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, struct {
+		Success bool `json:"success"`
+	}{Success: true})
+}
+
+// adminInstanceDropletView is the embedded `droplet` field on the
+// /api/admin/instances response. Mirrors the projection at
+// admin.py:132-142 — different from the public /api/instances embed:
+// includes container_network + image_path, drops droplet_type +
+// server_* (the admin instance list is about running containers, not
+// the droplet template's connection metadata).
+type adminInstanceDropletView struct {
+	ID                      string  `json:"id"`
+	DisplayName             string  `json:"display_name"`
+	Description             *string `json:"description"`
+	ContainerDockerImage    *string `json:"container_docker_image"`
+	ContainerDockerRegistry *string `json:"container_docker_registry"`
+	ContainerCores          *int    `json:"container_cores"`
+	ContainerMemory         *int    `json:"container_memory"`
+	ContainerNetwork        *string `json:"container_network"`
+	ImagePath               *string `json:"image_path"`
+}
+
+// adminInstanceUserView is the embedded `user` field. Mirrors
+// admin.py:143-146.
+type adminInstanceUserView struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+}
+
+// adminInstanceView is one entry in the GET /api/admin/instances
+// response. Mirrors admin.py:127-147 byte-for-byte.
+type adminInstanceView struct {
+	ID        string                   `json:"id"`
+	CreatedAt time.Time                `json:"created_at"`
+	UpdatedAt time.Time                `json:"updated_at"`
+	IP        string                   `json:"ip"`
+	Droplet   adminInstanceDropletView `json:"droplet"`
+	User      adminInstanceUserView    `json:"user"`
+}
+
+type adminInstancesResponse struct {
+	Success   bool                `json:"success"`
+	Instances []adminInstanceView `json:"instances"`
+}
+
+// ListInstances handles GET /api/admin/instances. Mirrors admin.py:103-152.
+// VIEW_INSTANCES-gated. Requires Docker to be wired (legacy
+// is_docker_available()): without a daemon there's no way to read the
+// per-container IP that the dashboard needs, so the legacy returns
+// 503 rather than partial data — we mirror that exactly.
+//
+// Per instance: look up the droplet row, look up the user row, ask
+// docker for the container, project IP via droplet.GetContainerIP. If
+// any step throws, skip the row entirely (matches the legacy
+// try/except wrapping the whole loop body — instance/droplet/user
+// rows can leak after a crash and we don't want one bad row to
+// 500 the whole list).
+func (h *Admin) ListInstances(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.ViewInstances) {
+		return
+	}
+	if h.Docker == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errResponse{
+			Error: "Docker service is not available, can't retrieve instances",
+		})
+		return
+	}
+
+	rows, err := h.Instances.List()
+	if err != nil {
+		log.Error("ListInstances: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+
+	resp := adminInstancesResponse{
+		Success:   true,
+		Instances: make([]adminInstanceView, 0, len(rows)),
+	}
+	for _, inst := range rows {
+		view, ok := h.adminInstanceView(r.Context(), inst)
+		if !ok {
+			// One of the lookups failed — skip the row exactly like
+			// the bare `except Exception: continue` at admin.py:148-150.
+			continue
+		}
+		resp.Instances = append(resp.Instances, view)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// adminInstanceView builds one /api/admin/instances entry by joining
+// the instance to its droplet, owning user, and Docker container.
+// Returns ok=false on any lookup miss so the caller can `continue`.
+func (h *Admin) adminInstanceView(ctx context.Context, inst models.DropletInstance) (adminInstanceView, bool) {
+	d, err := h.Droplets.Get(inst.DropletID)
+	if err != nil || d == nil {
+		// Droplet row was deleted underneath the instance — skip.
+		return adminInstanceView{}, false
+	}
+	u, err := h.Users.Get(inst.UserID)
+	if err != nil || u == nil {
+		// User row was deleted underneath the instance — skip.
+		return adminInstanceView{}, false
+	}
+
+	insp, err := h.Docker.Raw().ContainerInspect(ctx, dropletpkg.ContainerNamePrefix+inst.ID)
+	if err != nil {
+		// Container went away (orchestrator crash, manual `docker rm`,
+		// etc). Legacy treats this as "skip the row".
+		return adminInstanceView{}, false
+	}
+
+	return adminInstanceView{
+		ID:        inst.ID,
+		CreatedAt: inst.CreatedAt,
+		UpdatedAt: inst.UpdatedAt,
+		IP:        dropletpkg.GetContainerIP(insp, d),
+		Droplet: adminInstanceDropletView{
+			ID:                      d.ID,
+			DisplayName:             d.DisplayName,
+			Description:             d.Description,
+			ContainerDockerImage:    d.ContainerDockerImage,
+			ContainerDockerRegistry: d.ContainerDockerRegistry,
+			ContainerCores:          d.ContainerCores,
+			ContainerMemory:         d.ContainerMemory,
+			ContainerNetwork:        d.ContainerNetwork,
+			ImagePath:               d.ImagePath,
+		},
+		User: adminInstanceUserView{
+			ID:       u.ID,
+			Username: u.Username,
+		},
+	}, true
+}
+
+// DeleteInstance handles DELETE /api/admin/instance. Mirrors admin.py:329-350.
+// EDIT_INSTANCES-gated. 404 missing. Best-effort force-removes the
+// container (when Docker is wired); the legacy `pass`-on-exception
+// behavior is preserved — a missing container doesn't fail the
+// delete because the row is what the dashboard reads.
+//
+// Note: unlike ListInstances, the delete endpoint does NOT 503 when
+// Docker is unavailable — the legacy code at admin.py:340 wraps the
+// docker call in `if utils.docker.is_docker_available():` and falls
+// through to the row delete. We mirror that.
+func (h *Admin) DeleteInstance(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.EditInstances) {
+		return
+	}
+	var p struct {
+		ID string `json:"id"`
+	}
+	if err := decodeJSON(r, &p); err != nil {
+		writeJSON(w, http.StatusBadRequest, errResponse{Error: "invalid JSON"})
+		return
+	}
+
+	inst, err := h.Instances.Get(p.ID)
+	if err != nil {
+		log.Error("DeleteInstance lookup: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	if inst == nil {
+		writeJSON(w, http.StatusNotFound, errResponse{Error: "Instance not found"})
+		return
+	}
+
+	if h.Docker != nil {
+		name := dropletpkg.ContainerNamePrefix + inst.ID
+		if err := h.Docker.Raw().ContainerRemove(r.Context(), name,
+			container.RemoveOptions{Force: true}); err != nil {
+			// Match the legacy `pass`-on-exception at admin.py:344-345.
+			log.Error("DeleteInstance container remove: %s", err)
+		}
+	}
+
+	if err := h.Instances.Delete(inst.ID); err != nil {
+		log.Error("DeleteInstance Delete: %s", err)
 		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
 		return
 	}
