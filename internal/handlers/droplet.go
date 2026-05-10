@@ -338,6 +338,195 @@ func dropletToAPI(d *models.Droplet) dropletAPI {
 	}
 }
 
+// Destroy handles GET /api/instance/<id>/destroy. Mirrors
+// routes/droplet.py:651-690.
+//
+// Auth check: instance owner OR admin. On success: force-remove the
+// container, delete the nginx config, delete the DB row, return
+// {"success": true}. Container/nginx removal failures are logged but
+// don't fail the request — the row is what matters for the dashboard
+// to stop showing the dead instance.
+func (h *Droplet) Destroy(w http.ResponseWriter, r *http.Request) {
+	instanceID := instanceIDFromRequest(r, "/destroy")
+	if instanceID == "" {
+		writeJSON(w, http.StatusBadRequest, errResponse{Error: "missing instance id"})
+		return
+	}
+
+	uid := auth.GetUserID(r.Context(), h.Sessions)
+	if uid == "" {
+		writeJSON(w, http.StatusUnauthorized, errResponse{Error: "Unauthorized"})
+		return
+	}
+	user, err := h.Users.Get(uid)
+	if err != nil || user == nil {
+		writeJSON(w, http.StatusUnauthorized, errResponse{Error: "Unauthorized"})
+		return
+	}
+
+	inst, err := h.Instances.Get(instanceID)
+	if err != nil {
+		log.Error("Destroy inst lookup: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	if inst == nil {
+		writeJSON(w, http.StatusNotFound, errResponse{Error: "Instance not found"})
+		return
+	}
+
+	if inst.UserID != user.ID {
+		// Not the owner — must be admin.
+		isAdmin, err := h.userIsAdmin(user)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+			return
+		}
+		if !isAdmin {
+			writeJSON(w, http.StatusForbidden, errResponse{Error: "Unauthorized"})
+			return
+		}
+	}
+
+	if h.Docker != nil {
+		name := droplet.ContainerNamePrefix + instanceID
+		if err := h.Docker.Raw().ContainerRemove(r.Context(), name,
+			container.RemoveOptions{Force: true}); err != nil {
+			log.Error("Error removing container: %s", err)
+		}
+	}
+
+	if h.Nginx != nil {
+		if err := h.Nginx.RemoveConfig(instanceID); err != nil {
+			log.Error("Error removing nginx config: %s", err)
+		}
+	}
+
+	// The DB row delete is the operation that has to succeed.
+	if err := h.Instances.Delete(instanceID); err != nil {
+		log.Error("Destroy inst.Delete: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, struct {
+		Success bool `json:"success"`
+	}{Success: true})
+}
+
+// SessionView handles GET /droplet/<instance_id>. Mirrors
+// routes/droplet.py:618-649.
+//
+// Login-required: scs miss redirects to /. Instance miss also
+// redirects (matches the legacy redirect-on-not-found). Owner OR
+// admin can view; everyone else gets redirected to /.
+//
+// For guac droplets, generates the AES-256-CBC token via T2.17 and
+// passes it into the template; for container droplets, GuacToken=""
+// and Guacamole=false.
+func (h *Droplet) SessionView(w http.ResponseWriter, r *http.Request, tmpls *Registry) {
+	instanceID := instanceIDFromRequest(r, "")
+	if instanceID == "" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
+	uid := auth.GetUserID(r.Context(), h.Sessions)
+	if uid == "" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	user, err := h.Users.Get(uid)
+	if err != nil || user == nil {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
+	inst, err := h.Instances.Get(instanceID)
+	if err != nil {
+		log.Error("SessionView inst lookup: %s", err)
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	if inst == nil {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
+	if inst.UserID != user.ID {
+		isAdmin, err := h.userIsAdmin(user)
+		if err != nil || !isAdmin {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+	}
+
+	d, err := h.Droplets.Get(inst.DropletID)
+	if err != nil || d == nil {
+		// FK keeps this unreachable in production; defend anyway.
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
+	usingGuac := isGuacType(d.DropletType)
+	guacToken := ""
+	if usingGuac {
+		token, err := droplet.EncryptGuacToken(d, user)
+		if err != nil {
+			log.Error("EncryptGuacToken: %s", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		guacToken = token
+	}
+
+	view := DropletPageData{
+		InstanceID: instanceID,
+		GuacToken:  guacToken,
+		Guacamole:  usingGuac,
+		Droplet:    dropletViewFromModel(d),
+	}
+	if err := tmpls.Render(w, "droplet.html.tmpl", view); err != nil {
+		log.Error("rendering droplet.html: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+// dropletViewFromModel projects a models.Droplet onto the template
+// view-model shape declared in templates.go (T3.2).
+func dropletViewFromModel(d *models.Droplet) DropletView {
+	imagePath := ""
+	if d.ImagePath != nil {
+		imagePath = *d.ImagePath
+	}
+	return DropletView{
+		ID:          d.ID,
+		DisplayName: d.DisplayName,
+		DropletType: d.DropletType,
+		ImagePath:   imagePath,
+	}
+}
+
+// instanceIDFromRequest extracts the URL segment between
+// /api/instance/ (or /droplet/) and the optional suffix (e.g.
+// /destroy). Returns "" when the path doesn't match.
+//
+// We don't rely on chi's URL params here so the handler stays
+// router-agnostic; tests mount via http.NewServeMux which doesn't
+// have URL parameter support.
+func instanceIDFromRequest(r *http.Request, suffix string) string {
+	path := r.URL.Path
+	for _, prefix := range []string{"/api/instance/", "/droplet/"} {
+		if rest, ok := strings.CutPrefix(path, prefix); ok {
+			if suffix != "" {
+				rest = strings.TrimSuffix(rest, suffix)
+			}
+			return strings.Trim(rest, "/")
+		}
+	}
+	return ""
+}
+
 // requestBody is the JSON shape the browser POSTs to /api/instance/request.
 // Mirrors the legacy `request.json.get('droplet_id'/'resolution')` reads
 // at droplet.py:172,276.
