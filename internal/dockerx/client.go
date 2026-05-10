@@ -127,6 +127,24 @@ func (c *Client) ListNetworks(ctx context.Context) ([]Network, error) {
 	return out, nil
 }
 
+// ListImageTags returns every RepoTag string from every locally-stored
+// image, flattened. Multiple tags on one image (e.g. an image tagged
+// both `flowcaseweb/firefox:1.0` and `flowcaseweb/firefox:latest`)
+// each appear once in the slice. Order is whatever the daemon
+// returns. Used by the admin images-status endpoint to compute
+// per-droplet `exists` flags in one round-trip.
+func (c *Client) ListImageTags(ctx context.Context) ([]string, error) {
+	imgs, err := c.c.ImageList(ctx, image.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(imgs)*2)
+	for _, img := range imgs {
+		out = append(out, img.RepoTags...)
+	}
+	return out, nil
+}
+
 // ImageExists reports whether a local image with the given full
 // reference is present. Uses an exact-match comparison against
 // repotag like the legacy code at utils/docker.py:346-348.

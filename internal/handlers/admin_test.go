@@ -25,6 +25,7 @@ type adminFixture struct {
 	droplets   *models.DropletsRepo
 	insts      *models.InstancesRepo
 	registries *models.RegistriesRepo
+	logs       *models.LogsRepo
 	admin      *handlers.Admin
 	srvURL     string
 	password   string
@@ -46,6 +47,7 @@ func newAdminFixture(t *testing.T, fullPerms bool) *adminFixture {
 	droplets := models.NewDropletsRepo(dbx)
 	insts := models.NewInstancesRepo(dbx)
 	registries := models.NewRegistriesRepo(dbx)
+	logs := models.NewLogsRepo(dbx)
 
 	mgr := authpkg.NewSessionManager(dbx)
 
@@ -84,7 +86,7 @@ func newAdminFixture(t *testing.T, fullPerms bool) *adminFixture {
 	}
 
 	a := handlers.NewAuth(&config.Config{Port: 5000}, mgr, users, groups, insts, nil, nil, nil)
-	ah := handlers.NewAdmin(mgr, users, groups, droplets, insts, registries)
+	ah := handlers.NewAdmin(mgr, users, groups, droplets, insts, registries, logs)
 	ah.FlowcaseVersion = "test-build"
 
 	mux := http.NewServeMux()
@@ -104,6 +106,12 @@ func newAdminFixture(t *testing.T, fullPerms bool) *adminFixture {
 	mux.HandleFunc("GET /api/admin/registry", ah.ListRegistries)
 	mux.HandleFunc("POST /api/admin/registry", ah.EditRegistry)
 	mux.HandleFunc("DELETE /api/admin/registry", ah.DeleteRegistry)
+	mux.HandleFunc("GET /api/admin/logs", ah.ListLogs)
+	mux.HandleFunc("GET /api/admin/images/status", ah.ImagesStatus)
+	mux.HandleFunc("POST /api/admin/images/pull", ah.PullImage)
+	mux.HandleFunc("POST /api/admin/images/pull-all", ah.PullAllImages)
+	mux.HandleFunc("GET /api/admin/images/logs", ah.ImageLogs)
+	mux.HandleFunc("GET /api/admin/networks", ah.Networks)
 
 	srv := httptest.NewServer(mgr.LoadAndSave(mux))
 	t.Cleanup(srv.Close)
@@ -114,6 +122,7 @@ func newAdminFixture(t *testing.T, fullPerms bool) *adminFixture {
 		droplets:   droplets,
 		insts:      insts,
 		registries: registries,
+		logs:       logs,
 		admin:      ah,
 		srvURL:     srv.URL,
 		password:   pw,

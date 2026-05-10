@@ -46,6 +46,7 @@ type Admin struct {
 	Droplets   *models.DropletsRepo
 	Instances  *models.InstancesRepo
 	Registries *models.RegistriesRepo
+	Logs       *models.LogsRepo
 
 	Docker *dockerx.Client
 
@@ -82,6 +83,7 @@ func NewAdmin(
 	droplets *models.DropletsRepo,
 	instances *models.InstancesRepo,
 	registries *models.RegistriesRepo,
+	logs *models.LogsRepo,
 ) *Admin {
 	return &Admin{
 		Sessions:   sess,
@@ -90,6 +92,7 @@ func NewAdmin(
 		Droplets:   droplets,
 		Instances:  instances,
 		Registries: registries,
+		Logs:       logs,
 	}
 }
 
@@ -1503,6 +1506,494 @@ func (h *Admin) DeleteRegistry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		Success bool `json:"success"`
 	}{Success: true})
+}
+
+// adminLogView is one entry in the GET /api/admin/logs (and
+// /api/admin/images/logs) response. Mirrors the dict at admin.py:711-718
+// — `created_at` is rendered as `YYYY-MM-DD HH:MM:SS` (Python's
+// strftime('%Y-%m-%d %H:%M:%S') equivalent).
+type adminLogView struct {
+	ID        int64  `json:"id"`
+	CreatedAt string `json:"created_at"`
+	Level     string `json:"level"`
+	Message   string `json:"message"`
+}
+
+// adminLogPagination mirrors the inner pagination dict at
+// admin.py:719-724.
+type adminLogPagination struct {
+	Page    int `json:"page"`
+	PerPage int `json:"per_page"`
+	Total   int `json:"total"`
+	Pages   int `json:"pages"`
+}
+
+// adminLogsResponse is the top-level shape of /api/admin/logs and
+// /api/admin/images/logs.
+type adminLogsResponse struct {
+	Success    bool               `json:"success"`
+	Logs       []adminLogView     `json:"logs"`
+	Pagination adminLogPagination `json:"pagination"`
+}
+
+// allowedLogLevels mirrors the upper-cased whitelist at
+// admin.py:703 / 856. Anything else for `?type=` is silently
+// ignored.
+var allowedLogLevels = map[string]struct{}{
+	"DEBUG": {}, "INFO": {}, "WARNING": {}, "ERROR": {},
+}
+
+// dbTimestampFormat is the strftime equivalent the legacy emits.
+const dbTimestampFormat = "2006-01-02 15:04:05"
+
+// readPaginationParams pulls page / per_page off the query string,
+// defaulting to 1 / 50 and clamping <1 → 1. Matches the
+// `request.args.get('page', 1, type=int)` semantics: missing /
+// invalid → default. Per-page is capped at 1000 inside
+// LogsRepo.Paginate.
+func readPaginationParams(r *http.Request) (page, perPage int) {
+	page = 1
+	perPage = 50
+	if v := r.URL.Query().Get("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			page = n
+		}
+	}
+	if v := r.URL.Query().Get("per_page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			perPage = n
+		}
+	}
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 {
+		perPage = 1
+	}
+	return page, perPage
+}
+
+// readLevelFilter pulls ?type= and upper-cases. Returns "" when the
+// value is missing or not in the legacy whitelist (DEBUG/INFO/
+// WARNING/ERROR). Matches admin.py:703-704.
+func readLevelFilter(r *http.Request) string {
+	t := strings.ToUpper(r.URL.Query().Get("type"))
+	if _, ok := allowedLogLevels[t]; !ok {
+		return ""
+	}
+	return t
+}
+
+// totalPages computes the page count for a (total, perPage) pair.
+// Mirrors SQLAlchemy's `pages` attribute. perPage is guaranteed >= 1
+// by readPaginationParams.
+func totalPages(total, perPage int) int {
+	if total == 0 {
+		return 0
+	}
+	pages := total / perPage
+	if total%perPage != 0 {
+		pages++
+	}
+	return pages
+}
+
+// paginatedLogsResponse runs Logs.Paginate with the given filters
+// and returns a fully-shaped adminLogsResponse. Shared by ListLogs
+// and ImageLogs.
+func (h *Admin) paginatedLogsResponse(level, messageLike string, page, perPage int) (adminLogsResponse, error) {
+	rows, total, err := h.Logs.Paginate(level, messageLike, page, perPage)
+	if err != nil {
+		return adminLogsResponse{}, err
+	}
+	out := adminLogsResponse{
+		Success: true,
+		Logs:    make([]adminLogView, 0, len(rows)),
+		Pagination: adminLogPagination{
+			Page:    page,
+			PerPage: perPage,
+			Total:   total,
+			Pages:   totalPages(total, perPage),
+		},
+	}
+	for _, row := range rows {
+		out.Logs = append(out.Logs, adminLogView{
+			ID:        row.ID,
+			CreatedAt: row.CreatedAt.Format(dbTimestampFormat),
+			Level:     row.Level,
+			Message:   row.Message,
+		})
+	}
+	return out, nil
+}
+
+// ListLogs handles GET /api/admin/logs. Mirrors admin.py:691-725.
+// ADMIN_PANEL-gated. ?page= / ?per_page= / ?type= query params with
+// the same defaults as the legacy.
+func (h *Admin) ListLogs(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.AdminPanel) {
+		return
+	}
+	page, perPage := readPaginationParams(r)
+	level := readLevelFilter(r)
+
+	resp, err := h.paginatedLogsResponse(level, "", page, perPage)
+	if err != nil {
+		log.Error("ListLogs: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ImageLogs handles GET /api/admin/images/logs. Mirrors admin.py:840-890.
+// VIEW_DROPLETS-gated (legacy uses VIEW_DROPLETS, not ADMIN_PANEL —
+// it's surfaced inside the droplets/images admin panel). Same shape
+// as /api/admin/logs but message is restricted to entries containing
+// the literal substring "Docker image" — matches the
+// `Log.message.like('%Docker image%')` filter.
+func (h *Admin) ImageLogs(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.ViewDroplets) {
+		return
+	}
+	page, perPage := readPaginationParams(r)
+	level := readLevelFilter(r)
+
+	resp, err := h.paginatedLogsResponse(level, "%Docker image%", page, perPage)
+	if err != nil {
+		log.Error("ImageLogs: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// imageStatusEntry is one entry in the /api/admin/images/status
+// response, matched to the legacy dict at admin.py / utils/docker.py:350-355.
+type imageStatusEntry struct {
+	DropletName string `json:"droplet_name"`
+	Image       string `json:"image"`
+	Exists      bool   `json:"exists"`
+	Description string `json:"description"`
+}
+
+// imagesStatusResponse uses a map keyed by id ("guac" or droplet UUID)
+// to match the legacy dict-of-dicts shape. JSON output keys are
+// alphabetically sorted by Go's encoder; the legacy preserves
+// insertion order (Python 3.7+). The dashboard iterates the map
+// without relying on order, so the difference is visible only via
+// raw JSON inspection.
+type imagesStatusResponse struct {
+	Success bool                        `json:"success"`
+	Images  map[string]imageStatusEntry `json:"images"`
+}
+
+// fullImageRef computes the full pull reference for a droplet:
+// "<registry>/<image>" when registry is non-empty and not docker.io,
+// just "<image>" otherwise. Matches utils/docker.py:327-331 +
+// already-duplicated logic in dockerx.PullImage / droplet.spawn.go.
+//
+// TODO: extract this into dockerx (or a tiny imageref pkg) on a
+// follow-up — there are now four copies of the same six lines, but
+// extracting touches every caller and is out of scope for T3.19.
+func fullImageRef(registry *string, image string) string {
+	if registry == nil {
+		return image
+	}
+	reg := strings.TrimRight(*registry, "/")
+	if reg == "" || strings.Contains(reg, "docker.io") {
+		return image
+	}
+	return reg + "/" + image
+}
+
+// guacImageRef returns the orchestrator's hardcoded guac image
+// reference. Mirrors `flowcaseweb/flowcase-guac:{__version__}` at
+// utils/docker.py:192 / admin.py:786.
+func (h *Admin) guacImageRef() string {
+	return "flowcaseweb/flowcase-guac:" + h.FlowcaseVersion
+}
+
+// ImagesStatus handles GET /api/admin/images/status. Mirrors
+// admin.py:727-745 + utils/docker.py:302-361. VIEW_DROPLETS-gated.
+// 503 when Docker is unwired.
+//
+// Returns one entry per required image: the guac image plus every
+// droplet that has a container_docker_image set. Each entry's
+// `exists` reflects whether the exact <registry>/<image> tag is
+// stored locally.
+func (h *Admin) ImagesStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.ViewDroplets) {
+		return
+	}
+	if h.Docker == nil {
+		writeJSON(w, http.StatusServiceUnavailable,
+			errResponse{Error: "Docker service is not available"})
+		return
+	}
+
+	tags, err := h.Docker.ListImageTags(r.Context())
+	if err != nil {
+		log.Error("ImagesStatus list tags: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	tagSet := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		tagSet[t] = struct{}{}
+	}
+
+	droplets, err := h.Droplets.List()
+	if err != nil {
+		log.Error("ImagesStatus droplets: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+
+	guacRef := h.guacImageRef()
+	_, guacExists := tagSet[guacRef]
+	out := imagesStatusResponse{
+		Success: true,
+		Images: map[string]imageStatusEntry{
+			"guac": {
+				DropletName: "Guacamole",
+				Image:       guacRef,
+				Exists:      guacExists,
+				Description: "Guacamole VNC Server",
+			},
+		},
+	}
+	for _, d := range droplets {
+		if d.ContainerDockerImage == nil {
+			continue
+		}
+		ref := fullImageRef(d.ContainerDockerRegistry, *d.ContainerDockerImage)
+		_, ex := tagSet[ref]
+		out.Images[d.ID] = imageStatusEntry{
+			DropletName: d.DisplayName,
+			Image:       ref,
+			Exists:      ex,
+			Description: "Droplet: " + d.DisplayName,
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// adminPullPayload is the body for POST /api/admin/images/pull.
+// Mirrors the legacy `request.json.get(...)` reads at admin.py:760-762.
+type adminPullPayload struct {
+	DropletID string `json:"droplet_id"`
+	Registry  string `json:"registry"`
+	Image     string `json:"image"`
+}
+
+// PullImage handles POST /api/admin/images/pull. Mirrors admin.py:747-811.
+// EDIT_DROPLETS-gated. 503 when Docker is unwired.
+//
+// Three input shapes (matching the legacy):
+//  1. {"registry": "...", "image": "..."} — pull that ref directly.
+//  2. {"droplet_id": "guac"} — pull the orchestrator's pinned guac image.
+//  3. {"droplet_id": "<uuid>"} — look up the droplet, pull
+//     <registry>/<image>. 404 missing, 400 if no image configured.
+//
+// On success: {"success": true, "message": "..."}; on docker pull
+// failure: 500 with the error string.
+func (h *Admin) PullImage(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.EditDroplets) {
+		return
+	}
+	if h.Docker == nil {
+		writeJSON(w, http.StatusServiceUnavailable,
+			errResponse{Error: "Docker service is not available"})
+		return
+	}
+
+	var p adminPullPayload
+	if err := decodeJSON(r, &p); err != nil {
+		writeJSON(w, http.StatusBadRequest, errResponse{Error: "invalid JSON"})
+		return
+	}
+
+	// Direct {registry, image} path takes priority over droplet_id,
+	// matching the legacy if-chain at admin.py:765-776.
+	if p.Registry != "" && p.Image != "" {
+		h.runPull(w, r, p.Registry, p.Image)
+		return
+	}
+
+	if p.DropletID == "" {
+		writeJSON(w, http.StatusBadRequest, errResponse{Error: "Droplet ID is required"})
+		return
+	}
+
+	if p.DropletID == "guac" {
+		h.runPull(w, r, "", h.guacImageRef())
+		return
+	}
+
+	d, err := h.Droplets.Get(p.DropletID)
+	if err != nil {
+		log.Error("PullImage Get: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	if d == nil {
+		writeJSON(w, http.StatusNotFound, errResponse{Error: "Droplet not found"})
+		return
+	}
+	if d.ContainerDockerImage == nil || *d.ContainerDockerImage == "" {
+		writeJSON(w, http.StatusBadRequest,
+			errResponse{Error: "Droplet has no Docker image configured"})
+		return
+	}
+
+	registry := ""
+	if d.ContainerDockerRegistry != nil {
+		registry = *d.ContainerDockerRegistry
+	}
+	h.runPull(w, r, registry, *d.ContainerDockerImage)
+}
+
+// runPull performs the docker pull and writes the success / failure
+// envelope. Shared by every PullImage code path so the response
+// shape stays consistent.
+func (h *Admin) runPull(w http.ResponseWriter, r *http.Request, registry, ref string) {
+	if err := h.Docker.PullImage(r.Context(), registry, ref); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errResponse{
+			Error: "Error pulling Docker image " + ref + ": " + err.Error(),
+		})
+		return
+	}
+	full := fullImageRef(&registry, ref)
+	writeJSON(w, http.StatusOK, struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}{
+		Success: true,
+		Message: "Successfully pulled " + full,
+	})
+}
+
+// PullAllImages handles POST /api/admin/images/pull-all. Mirrors
+// admin.py:813-838 + utils/docker.py:179-260. EDIT_DROPLETS-gated.
+// 503 when Docker is unwired.
+//
+// Kicks off pulls for the guac image plus every droplet image
+// asynchronously (one goroutine, sequential pulls inside it) so the
+// HTTP response returns immediately with "Started downloading...".
+// The legacy is synchronous in the request thread; running async
+// matches the user-visible message ("check logs for progress")
+// without changing semantics — the docker daemon serializes pulls
+// regardless.
+func (h *Admin) PullAllImages(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.EditDroplets) {
+		return
+	}
+	if h.Docker == nil {
+		writeJSON(w, http.StatusServiceUnavailable,
+			errResponse{Error: "Docker service is not available"})
+		return
+	}
+
+	droplets, err := h.Droplets.List()
+	if err != nil {
+		log.Error("PullAllImages list: %s", err)
+		writeJSON(w, http.StatusInternalServerError,
+			errResponse{Error: "Failed to start image downloads: " + err.Error()})
+		return
+	}
+
+	// Snapshot work before kicking off the goroutine so the request
+	// can return without holding the DB connection.
+	type pullJob struct {
+		registry string
+		ref      string
+		desc     string
+	}
+	jobs := []pullJob{
+		{"", h.guacImageRef(), "Guacamole VNC Server"},
+	}
+	for _, d := range droplets {
+		if d.ContainerDockerImage == nil {
+			continue
+		}
+		registry := ""
+		if d.ContainerDockerRegistry != nil {
+			registry = *d.ContainerDockerRegistry
+		}
+		jobs = append(jobs, pullJob{
+			registry: registry,
+			ref:      *d.ContainerDockerImage,
+			desc:     "Droplet: " + d.DisplayName,
+		})
+	}
+
+	// Use a fresh background context — the request's context may be
+	// cancelled before the pulls finish.
+	go func(jobs []pullJob) {
+		for _, j := range jobs {
+			log.Info("Pulling Docker image %s (%s)", j.ref, j.desc)
+			if err := h.Docker.PullImage(context.Background(), j.registry, j.ref); err != nil {
+				log.Error("Error pulling Docker image %s (%s): %s", j.ref, j.desc, err)
+			}
+		}
+	}(jobs)
+
+	writeJSON(w, http.StatusOK, struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}{
+		Success: true,
+		Message: "Started downloading all images. Check logs for progress.",
+	})
+}
+
+// adminNetworkView is one entry in the /api/admin/networks response.
+// Mirrors the dict at utils/docker.py:399 (id + name only — driver
+// is dropped because the legacy doesn't surface it).
+type adminNetworkView struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type adminNetworksResponse struct {
+	Success  bool               `json:"success"`
+	Networks []adminNetworkView `json:"networks"`
+}
+
+// Networks handles GET /api/admin/networks. Mirrors admin.py:892-922.
+// VIEW_DROPLETS-gated (the legacy uses VIEW_DROPLETS — the network
+// picker lives inside the droplet edit form). 503 when Docker is
+// unwired.
+//
+// Returns flowcase_default_network plus any network whose name
+// starts with `lan_` or `vlan_` — dockerx.ListNetworks already
+// applies that filter, matching admin.py:907-914.
+func (h *Admin) Networks(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.ViewDroplets) {
+		return
+	}
+	if h.Docker == nil {
+		writeJSON(w, http.StatusServiceUnavailable,
+			errResponse{Error: "Docker service is not available"})
+		return
+	}
+
+	nets, err := h.Docker.ListNetworks(r.Context())
+	if err != nil {
+		log.Error("Networks list: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: err.Error()})
+		return
+	}
+
+	out := adminNetworksResponse{
+		Success:  true,
+		Networks: make([]adminNetworkView, 0, len(nets)),
+	}
+	for _, n := range nets {
+		out.Networks = append(out.Networks, adminNetworkView{ID: n.ID, Name: n.Name})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // nginxVersion runs `nginx -v` inside h.NginxContainer and parses the
