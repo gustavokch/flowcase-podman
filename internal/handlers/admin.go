@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -38,11 +40,12 @@ func generateUUID() string { return uuid.NewString() }
 // Admin holds dependencies for the /api/admin/* routes. Each handler
 // gates on a permissions.Permission via requirePerm before running.
 type Admin struct {
-	Sessions  *scs.SessionManager
-	Users     *models.UsersRepo
-	Groups    *models.GroupsRepo
-	Droplets  *models.DropletsRepo
-	Instances *models.InstancesRepo
+	Sessions   *scs.SessionManager
+	Users      *models.UsersRepo
+	Groups     *models.GroupsRepo
+	Droplets   *models.DropletsRepo
+	Instances  *models.InstancesRepo
+	Registries *models.RegistriesRepo
 
 	Docker *dockerx.Client
 
@@ -55,23 +58,38 @@ type Admin struct {
 	// FlowcaseVersion is the orchestrator's release tag, surfaced in
 	// system info. Mirrors __version__ at flowcase/__init__.py.
 	FlowcaseVersion string
+
+	// RegistryLock pins the orchestrator to a single read-only
+	// registry URL. When non-empty, /api/admin/registry GET returns
+	// only that registry (with id="locked") and POST/DELETE return
+	// 403 "Registry is locked and cannot be modified". Mirrors the
+	// FLOWCASE_REGISTRY_LOCK env var read at admin.py:594.
+	RegistryLock string
+
+	// RegistryHTTP is the http.Client used to fetch info.json /
+	// droplets.json from registry URLs. Defaults to a 5-second
+	// timeout client at first use; tests can swap it in.
+	RegistryHTTP *http.Client
 }
 
 // NewAdmin builds an Admin handler set. Docker / NginxContainer /
-// FlowcaseVersion can be set on the struct after construction.
+// FlowcaseVersion / RegistryLock / RegistryHTTP can be set on the
+// struct after construction.
 func NewAdmin(
 	sess *scs.SessionManager,
 	users *models.UsersRepo,
 	groups *models.GroupsRepo,
 	droplets *models.DropletsRepo,
 	instances *models.InstancesRepo,
+	registries *models.RegistriesRepo,
 ) *Admin {
 	return &Admin{
-		Sessions:  sess,
-		Users:     users,
-		Groups:    groups,
-		Droplets:  droplets,
-		Instances: instances,
+		Sessions:   sess,
+		Users:      users,
+		Groups:     groups,
+		Droplets:   droplets,
+		Instances:  instances,
+		Registries: registries,
 	}
 }
 
@@ -815,7 +833,7 @@ type adminDropletPayload struct {
 }
 
 // emptyToNil collapses a *string that points at "" to nil, matching the
-// legacy "if X == '': X = None" pattern (admin.py:206-217, 274-276).
+// legacy "if X == ”: X = None" pattern (admin.py:206-217, 274-276).
 func emptyToNil(s *string) *string {
 	if s == nil || *s == "" {
 		return nil
@@ -1220,6 +1238,264 @@ func (h *Admin) DeleteInstance(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.Instances.Delete(inst.ID); err != nil {
 		log.Error("DeleteInstance Delete: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, struct {
+		Success bool `json:"success"`
+	}{Success: true})
+}
+
+// adminRegistryEntry is one entry in the /api/admin/registry GET
+// response. Mirrors admin.py:616-621 / 639-644.
+//
+// ID is `any` because the legacy code stuffs the literal string
+// "locked" into the field for the FLOWCASE_REGISTRY_LOCK case and an
+// integer for DB rows. The dashboard reads .id without type-checking
+// so we pass through both shapes verbatim.
+type adminRegistryEntry struct {
+	ID       any    `json:"id"`
+	URL      string `json:"url"`
+	Info     any    `json:"info"`
+	Droplets any    `json:"droplets"`
+}
+
+type adminRegistryListResponse struct {
+	Success         bool                 `json:"success"`
+	FlowcaseVersion string               `json:"flowcase_version"`
+	Registry        []adminRegistryEntry `json:"registry"`
+	RegistryLocked  bool                 `json:"registry_locked"`
+}
+
+// registryFetchTimeout caps each info.json / droplets.json GET so
+// a dead registry can't hang the admin panel. The legacy `requests.get`
+// has no timeout at all — this is a small ergonomic improvement that
+// preserves correctness on the happy path (the bare except in
+// admin.py:609 / 631 catches the resulting error the same way it
+// catches network errors today).
+const registryFetchTimeout = 5 * time.Second
+
+// failedInfoFallback is the sentinel `info` payload the legacy returns
+// when info.json fetch / decode fails. Matches admin.py:610-612 /
+// 632-634 verbatim.
+var failedInfoFallback = map[string]any{"name": "Failed to get info"}
+
+// emptyDropletsFallback is the sentinel `droplets` payload returned
+// alongside a failed registry fetch. Empty array.
+var emptyDropletsFallback = []any{}
+
+// httpClient returns the registry http.Client, lazily initializing
+// with a sensible timeout. Tests can pre-set h.RegistryHTTP.
+func (h *Admin) httpClient() *http.Client {
+	if h.RegistryHTTP != nil {
+		return h.RegistryHTTP
+	}
+	return &http.Client{Timeout: registryFetchTimeout}
+}
+
+// ListRegistries handles GET /api/admin/registry. Mirrors
+// admin.py:587-646. VIEW_REGISTRY-gated.
+//
+// Two modes:
+//   - Locked: when h.RegistryLock is non-empty, the response carries
+//     a single entry with id="locked" and url=h.RegistryLock; the DB
+//     is not consulted.
+//   - Open: every row in the registry table. info.json and
+//     droplets.json are fetched per registry; failures collapse to
+//     {"name":"Failed to get info"} + [] like the legacy code.
+//
+// flowcase_version is included unconditionally (admin.py:598).
+func (h *Admin) ListRegistries(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePerm(w, r, permissions.ViewRegistry) {
+		return
+	}
+
+	resp := adminRegistryListResponse{
+		Success:         true,
+		FlowcaseVersion: h.FlowcaseVersion,
+		Registry:        []adminRegistryEntry{},
+		RegistryLocked:  h.RegistryLock != "",
+	}
+
+	if h.RegistryLock != "" {
+		info, droplets := h.fetchRegistry(r.Context(), h.RegistryLock)
+		resp.Registry = append(resp.Registry, adminRegistryEntry{
+			ID:       "locked",
+			URL:      h.RegistryLock,
+			Info:     info,
+			Droplets: droplets,
+		})
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	rows, err := h.Registries.List()
+	if err != nil {
+		log.Error("ListRegistries: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	for _, row := range rows {
+		info, droplets := h.fetchRegistry(r.Context(), row.URL)
+		resp.Registry = append(resp.Registry, adminRegistryEntry{
+			ID:       row.ID,
+			URL:      row.URL,
+			Info:     info,
+			Droplets: droplets,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// fetchRegistry GETs <baseURL>/info.json and <baseURL>/droplets.json
+// and decodes them as JSON. Any failure on either request — bad
+// status, bad JSON, transport error, timeout — collapses BOTH
+// payloads to the failed-fetch fallbacks, matching the legacy
+// try/except wrapping the pair of requests.get calls.
+//
+// Note: the URLs are joined with a literal "/" — a base URL with a
+// trailing slash will produce a double-slash, exactly as the legacy
+// f-string does. Don't normalize; preserve byte-identical wire format.
+func (h *Admin) fetchRegistry(ctx context.Context, baseURL string) (any, any) {
+	infoBytes, err := h.fetchJSON(ctx, baseURL+"/info.json")
+	if err != nil {
+		log.Error("Failed to get registry info from %s: %s", baseURL, err)
+		return failedInfoFallback, emptyDropletsFallback
+	}
+	dropletsBytes, err := h.fetchJSON(ctx, baseURL+"/droplets.json")
+	if err != nil {
+		log.Error("Failed to get registry info from %s: %s", baseURL, err)
+		return failedInfoFallback, emptyDropletsFallback
+	}
+
+	var info any
+	if err := json.Unmarshal(infoBytes, &info); err != nil {
+		log.Error("Failed to get registry info from %s: %s", baseURL, err)
+		return failedInfoFallback, emptyDropletsFallback
+	}
+	var droplets any
+	if err := json.Unmarshal(dropletsBytes, &droplets); err != nil {
+		log.Error("Failed to get registry info from %s: %s", baseURL, err)
+		return failedInfoFallback, emptyDropletsFallback
+	}
+	return info, droplets
+}
+
+// fetchJSON GETs `url` and returns the response body. Non-2xx and
+// transport errors both surface as errors so the caller can bucket
+// them into the failed-fetch fallback.
+func (h *Admin) fetchJSON(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := h.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	const maxBody = 4 * 1024 * 1024
+	return io.ReadAll(io.LimitReader(resp.Body, maxBody))
+}
+
+// EditRegistry handles POST /api/admin/registry. Mirrors admin.py:658-675.
+//
+// Locked-mode preempts every other check: when h.RegistryLock is
+// non-empty, return 403 regardless of permissions. Otherwise:
+//   - EDIT_REGISTRY-gated
+//   - 400 on missing url
+//   - 400 on duplicate url (per legacy admin.py:667-669, "Registry
+//     with this URL already exists")
+func (h *Admin) EditRegistry(w http.ResponseWriter, r *http.Request) {
+	if h.RegistryLock != "" {
+		writeJSON(w, http.StatusForbidden,
+			errResponse{Error: "Registry is locked and cannot be modified"})
+		return
+	}
+	if !h.requirePerm(w, r, permissions.EditRegistry) {
+		return
+	}
+	var p struct {
+		URL string `json:"url"`
+	}
+	if err := decodeJSON(r, &p); err != nil {
+		writeJSON(w, http.StatusBadRequest, errResponse{Error: "invalid JSON"})
+		return
+	}
+	if p.URL == "" {
+		writeJSON(w, http.StatusBadRequest, errResponse{Error: "URL is required"})
+		return
+	}
+
+	existing, err := h.Registries.GetByURL(p.URL)
+	if err != nil {
+		log.Error("EditRegistry GetByURL: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	if existing != nil {
+		writeJSON(w, http.StatusBadRequest,
+			errResponse{Error: "Registry with this URL already exists"})
+		return
+	}
+
+	if _, err := h.Registries.Create(p.URL); err != nil {
+		log.Error("EditRegistry Create: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, struct {
+		Success bool `json:"success"`
+	}{Success: true})
+}
+
+// DeleteRegistry handles DELETE /api/admin/registry. Mirrors admin.py:677-689.
+// Locked-mode preempt + EDIT_REGISTRY gate, same shape as EditRegistry.
+// 404 on missing.
+//
+// The body's `id` is JSON-decoded as a number (the legacy code stores
+// auto-increment ints in the URL field — there's no way the dashboard
+// is sending a string id). flexNumber lets a stringly-typed id from
+// a hand-rolled curl still work.
+func (h *Admin) DeleteRegistry(w http.ResponseWriter, r *http.Request) {
+	if h.RegistryLock != "" {
+		writeJSON(w, http.StatusForbidden,
+			errResponse{Error: "Registry is locked and cannot be modified"})
+		return
+	}
+	if !h.requirePerm(w, r, permissions.EditRegistry) {
+		return
+	}
+	var p struct {
+		ID flexNumber `json:"id"`
+	}
+	if err := decodeJSON(r, &p); err != nil {
+		writeJSON(w, http.StatusBadRequest, errResponse{Error: "invalid JSON"})
+		return
+	}
+	if !p.ID.set {
+		writeJSON(w, http.StatusNotFound, errResponse{Error: "Registry not found"})
+		return
+	}
+	id := int64(p.ID.val)
+
+	existing, err := h.Registries.Get(id)
+	if err != nil {
+		log.Error("DeleteRegistry Get: %s", err)
+		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
+		return
+	}
+	if existing == nil {
+		writeJSON(w, http.StatusNotFound, errResponse{Error: "Registry not found"})
+		return
+	}
+	if err := h.Registries.Delete(id); err != nil {
+		log.Error("DeleteRegistry Delete: %s", err)
 		writeJSON(w, http.StatusInternalServerError, errResponse{Error: "internal error"})
 		return
 	}

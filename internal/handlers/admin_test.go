@@ -20,14 +20,16 @@ import (
 // adminFixture wires deps for the /api/admin/* routes plus a logged-in
 // admin user (PermAdminPanel + EditUsers + ViewUsers) so the gates fire.
 type adminFixture struct {
-	users     *models.UsersRepo
-	groups    *models.GroupsRepo
-	droplets  *models.DropletsRepo
-	insts     *models.InstancesRepo
-	srvURL    string
-	password  string
-	user      *models.User
-	adminGrp  *models.Group
+	users      *models.UsersRepo
+	groups     *models.GroupsRepo
+	droplets   *models.DropletsRepo
+	insts      *models.InstancesRepo
+	registries *models.RegistriesRepo
+	admin      *handlers.Admin
+	srvURL     string
+	password   string
+	user       *models.User
+	adminGrp   *models.Group
 }
 
 func newAdminFixture(t *testing.T, fullPerms bool) *adminFixture {
@@ -43,6 +45,7 @@ func newAdminFixture(t *testing.T, fullPerms bool) *adminFixture {
 	groups := models.NewGroupsRepo(dbx)
 	droplets := models.NewDropletsRepo(dbx)
 	insts := models.NewInstancesRepo(dbx)
+	registries := models.NewRegistriesRepo(dbx)
 
 	mgr := authpkg.NewSessionManager(dbx)
 
@@ -81,7 +84,7 @@ func newAdminFixture(t *testing.T, fullPerms bool) *adminFixture {
 	}
 
 	a := handlers.NewAuth(&config.Config{Port: 5000}, mgr, users, groups, insts, nil, nil, nil)
-	ah := handlers.NewAdmin(mgr, users, groups, droplets, insts)
+	ah := handlers.NewAdmin(mgr, users, groups, droplets, insts, registries)
 	ah.FlowcaseVersion = "test-build"
 
 	mux := http.NewServeMux()
@@ -98,19 +101,24 @@ func newAdminFixture(t *testing.T, fullPerms bool) *adminFixture {
 	mux.HandleFunc("DELETE /api/admin/droplet", ah.DeleteDroplet)
 	mux.HandleFunc("GET /api/admin/instances", ah.ListInstances)
 	mux.HandleFunc("DELETE /api/admin/instance", ah.DeleteInstance)
+	mux.HandleFunc("GET /api/admin/registry", ah.ListRegistries)
+	mux.HandleFunc("POST /api/admin/registry", ah.EditRegistry)
+	mux.HandleFunc("DELETE /api/admin/registry", ah.DeleteRegistry)
 
 	srv := httptest.NewServer(mgr.LoadAndSave(mux))
 	t.Cleanup(srv.Close)
 
 	return &adminFixture{
-		users:    users,
-		groups:   groups,
-		droplets: droplets,
-		insts:    insts,
-		srvURL:   srv.URL,
-		password: pw,
-		user:     u,
-		adminGrp: g,
+		users:      users,
+		groups:     groups,
+		droplets:   droplets,
+		insts:      insts,
+		registries: registries,
+		admin:      ah,
+		srvURL:     srv.URL,
+		password:   pw,
+		user:       u,
+		adminGrp:   g,
 	}
 }
 

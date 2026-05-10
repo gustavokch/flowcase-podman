@@ -25,6 +25,21 @@ func (r *RegistriesRepo) Get(id int64) (*Registry, error) {
 	return &x, nil
 }
 
+// GetByURL returns the registry row whose url column matches `url`
+// exactly, or (nil, nil) when none is found. Mirrors the duplicate
+// guard at admin.py:667-669.
+func (r *RegistriesRepo) GetByURL(url string) (*Registry, error) {
+	var x Registry
+	err := r.DB.Get(&x, `SELECT * FROM registry WHERE url = ?`, url)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &x, nil
+}
+
 // List returns every registry, ordered by created_at ascending.
 func (r *RegistriesRepo) List() ([]Registry, error) {
 	var xs []Registry
