@@ -93,6 +93,9 @@ func newAdminFixture(t *testing.T, fullPerms bool) *adminFixture {
 	mux.HandleFunc("GET /api/admin/groups", ah.ListGroups)
 	mux.HandleFunc("POST /api/admin/group", ah.EditGroup)
 	mux.HandleFunc("DELETE /api/admin/group", ah.DeleteGroup)
+	mux.HandleFunc("GET /api/admin/droplets", ah.ListDroplets)
+	mux.HandleFunc("POST /api/admin/droplet", ah.EditDroplet)
+	mux.HandleFunc("DELETE /api/admin/droplet", ah.DeleteDroplet)
 
 	srv := httptest.NewServer(mgr.LoadAndSave(mux))
 	t.Cleanup(srv.Close)
