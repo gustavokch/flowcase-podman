@@ -223,7 +223,9 @@ def request_new_instance():
 	images = utils.docker.docker_client.images.list()
 	image_name = droplet.container_docker_image
 	if droplet.container_docker_registry and "docker.io" not in droplet.container_docker_registry:
-		image_name = droplet.container_docker_registry + "/" + image_name
+		# rstrip the registry like pull_single_image does; a trailing slash would
+		# otherwise produce a double slash that never matches a local image tag.
+		image_name = droplet.container_docker_registry.rstrip("/") + "/" + image_name
 
 	image_exists = False
 	for image in images:

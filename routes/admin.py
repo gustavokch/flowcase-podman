@@ -225,7 +225,7 @@ def api_admin_edit_droplet():
 		return jsonify({"success": False, "error": "Droplet Type is required"}), 400
  
 	if droplet.droplet_type == "container":
-		droplet.container_docker_registry = request.json.get('container_docker_registry')
+		droplet.container_docker_registry = (request.json.get('container_docker_registry') or "").strip().rstrip("/")
 		if not droplet.container_docker_registry:
 			return jsonify({"success": False, "error": "Docker Registry is required"}), 400
 
