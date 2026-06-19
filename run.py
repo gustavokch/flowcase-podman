@@ -2,6 +2,11 @@ import os
 import sys
 import subprocess
 import argparse
+from dotenv import load_dotenv
+
+# Load .env into the environment before anything reads os.getenv (e.g. Docker
+# registry credentials). Safe no-op when no .env file is present.
+load_dotenv()
 
 # Parse command line arguments first, before any imports that might fail
 def parse_args():

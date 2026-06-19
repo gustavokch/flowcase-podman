@@ -4,7 +4,7 @@ Get Flowcase up and running in 5 minutes!
 
 ## Prerequisites
 
-- Docker Desktop installed and running
+- Podman installed and running (`sudo systemctl enable --now podman.socket`)
 - 2GB+ RAM available
 - 10GB+ free disk space
 
@@ -46,7 +46,7 @@ Password: <random-password>
 
 Or view logs:
 ```bash
-docker compose logs -f
+podman compose logs -f
 ```
 
 ### Step 4: Access Flowcase
@@ -70,23 +70,23 @@ You're now running Flowcase!
 
 ```bash
 # View logs
-docker compose logs -f
+podman compose logs -f
 
 # Stop Flowcase
-docker compose down
+podman compose down
 
 # Start Flowcase
-docker compose up -d
+podman compose up -d
 
 # Restart
-docker compose restart
+podman compose restart
 ```
 
 ## Troubleshooting
 
 **Can't access?**
-- Check containers: `docker compose ps`
-- View logs: `docker compose logs -f`
+- Check containers: `podman compose ps`
+- View logs: `podman compose logs -f`
 - Try `http://localhost` instead of `https://localhost`
 
 **Need help?**

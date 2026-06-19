@@ -2,6 +2,11 @@ import os
 import multiprocessing
 import threading
 import time
+from dotenv import load_dotenv
+
+# Load .env before any os.getenv (e.g. registry credentials in init_docker)
+load_dotenv()
+
 from utils.docker import pull_images
 
 bind = "0.0.0.0:5000"
@@ -13,7 +18,11 @@ worker_connections = 1000
 max_requests = 1000
 max_requests_jitter = 50
 
-timeout = 30
+# Manual image pulls (/api/admin/images/pull) and pull-on-launch run a blocking
+# images.pull() inside the request worker. A large first pull (multi-hundred-MB
+# droplet images) exceeds the default 30s, so the master killed the worker mid-
+# download ("WORKER TIMEOUT") and the image never landed. Allow long pulls.
+timeout = 600
 keepalive = 2
 
 accesslog = "-"
@@ -49,15 +58,25 @@ def on_starting(server):
 	
 	cleanup_containers(temp_app)
 	
-	# start background thread for periodic image checks
+	# start background thread for periodic image checks.
+	# pull_images() only fetches images missing locally, so this just backfills
+	# anything added since startup. A long interval avoids hammering the registry
+	# pull-rate limit (the previous 60s sweep was the main quota burner).
+	PULL_INTERVAL_SECONDS = 6 * 60 * 60  # 6 hours
 	def pull_images_worker():
+		# Pull missing images once at startup, then re-check every 6h. Both
+		# pulls only fetch images not already present locally.
+		first = True
 		while True:
 			try:
-				time.sleep(60)
+				if not first:
+					time.sleep(PULL_INTERVAL_SECONDS)
+				first = False
 				with temp_app.app_context():
 					pull_images()
 			except Exception as e:
 				print(f"Error in pull_images_worker: {e}")
+				time.sleep(PULL_INTERVAL_SECONDS)
 	
 	thread = threading.Thread(target=pull_images_worker, daemon=True)
 	thread.start()

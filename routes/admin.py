@@ -225,7 +225,7 @@ def api_admin_edit_droplet():
 		return jsonify({"success": False, "error": "Droplet Type is required"}), 400
  
 	if droplet.droplet_type == "container":
-		droplet.container_docker_registry = request.json.get('container_docker_registry')
+		droplet.container_docker_registry = (request.json.get('container_docker_registry') or "").strip().rstrip("/")
 		if not droplet.container_docker_registry:
 			return jsonify({"success": False, "error": "Docker Registry is required"}), 400
 
@@ -302,7 +302,11 @@ def api_admin_delete_droplet():
 	droplet = Droplet.query.filter_by(id=droplet_id).first()
 	if not droplet:
 		return jsonify({"success": False, "error": "Droplet not found"}), 404
- 
+
+	# Remove droplet-pinned persistent-profile volumes before deleting the record
+	if utils.docker.is_docker_available():
+		utils.docker.cleanup_profile_volumes(droplet=droplet)
+
 	db.session.delete(droplet)
 	db.session.commit()
  
@@ -429,7 +433,11 @@ def api_admin_delete_user():
 	
 	if user.protected:
 		return jsonify({"success": False, "error": "This user is protected. Protected users cannot be deleted."}), 400
-	
+
+	# Remove this user's persistent-profile volumes
+	if utils.docker.is_docker_available():
+		utils.docker.cleanup_profile_volumes(user_id=user_id)
+
 	db.session.delete(user)
 	db.session.commit()
  
@@ -781,9 +789,8 @@ def api_admin_pull_image():
 
 	# Handle special guac droplet
 	if droplet_id == "guac":
-		from __init__ import __version__
 		registry = "https://index.docker.io/v1/"
-		image_name = f"flowcaseweb/flowcase-guac:{__version__}"
+		image_name = utils.docker.guac_image()
 	else:
 		# Get droplet info
 		droplet = Droplet.query.filter_by(id=droplet_id).first()

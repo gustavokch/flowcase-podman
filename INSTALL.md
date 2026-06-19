@@ -27,12 +27,12 @@ chmod +x install.sh
 
 2. **Start services:**
    ```bash
-   docker compose up -d
+   podman compose up -d
    ```
 
 3. **Get credentials:**
    ```bash
-   docker compose logs -f
+   podman compose logs -f
    # Look for "Created default users"
    ```
 
@@ -63,16 +63,16 @@ See [SETUP.md](SETUP.md#troubleshooting) for detailed troubleshooting.
 Quick fixes:
 ```bash
 # Check status
-docker compose ps
+podman compose ps
 
 # View logs
-docker compose logs -f
+podman compose logs -f
 
 # Restart
-docker compose restart
+podman compose restart
 
 # Reset (⚠️ deletes data)
-docker compose down -v
-docker compose up -d
+podman compose down -v
+podman compose up -d
 ```
 

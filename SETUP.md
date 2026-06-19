@@ -33,13 +33,21 @@ Or follow the [manual installation](#manual-installation) steps below.
 
 Before installing Flowcase, ensure you have:
 
-1. **Docker** (version 20.10 or later)
-   - Download: https://www.docker.com/get-started
-   - Verify: `docker --version`
+1. **Podman** (rootful, version 4.x or later)
+   - Install: https://podman.io/docs/installation
+   - Verify: `podman --version`
+   - Enable the Docker-compatible API socket: `sudo systemctl enable --now podman.socket`
+   - **Networking requires `netavark` + `aardvark-dns` ≥ 1.5.** Ubuntu 24.04 ships
+     the broken **1.4.0**, where `aardvark-dns` fails to serve names for networks
+     created after it starts — nginx then crash-loops with
+     `host not found in upstream "web"`. Check with `podman info | grep -A2 aardvark`.
+     If it shows 1.4.x, install the v1.14.0 binaries from the
+     `containers/netavark` and `containers/aardvark-dns` GitHub releases into
+     `/usr/lib/podman/`, then `sudo pkill aardvark-dns` and recreate the stack.
 
-2. **Docker Compose** (version 2.0 or later)
-   - Usually included with Docker Desktop
-   - Verify: `docker compose version`
+2. **Podman Compose** (`podman compose` plugin, or `podman-compose`)
+   - Verify: `podman compose version`
+   - Docker (`docker compose`) also works, but Podman avoids Docker Hub pull-rate limits.
 
 3. **System Requirements:**
    - At least 2GB RAM
@@ -121,7 +129,7 @@ openssl rand -base64 32
 #### Step 3: Start Flowcase
 
 ```bash
-docker compose up -d
+podman compose up -d
 ```
 
 The `-d` flag runs containers in detached mode (background).
@@ -129,7 +137,7 @@ The `-d` flag runs containers in detached mode (background).
 #### Step 4: View Logs
 
 ```bash
-docker compose logs -f
+podman compose logs -f
 ```
 
 Look for the default admin credentials in the output:
@@ -183,7 +191,7 @@ The main `docker-compose.yml` includes:
      ```yaml
      command: python run.py --traefik-authentik
      ```
-3. Restart services: `docker compose restart web nginx traefik`
+3. Restart services: `podman compose restart web nginx traefik`
 
 > [!IMPORTANT]
 > When enabling Authentik, you must enable BOTH:
@@ -281,7 +289,7 @@ Authentik provides enterprise-grade authentication and authorization. Follow the
    ```
 4. Restart services:
    ```bash
-   docker compose restart web nginx traefik
+   podman compose restart web nginx traefik
    ```
 
 > [!IMPORTANT]
@@ -306,7 +314,7 @@ Authentik provides enterprise-grade authentication and authorization. Follow the
 
 **Check logs:**
 ```bash
-docker compose logs
+podman compose logs
 ```
 
 **Common issues:**
@@ -318,12 +326,12 @@ docker compose logs
 
 **Without Authentik:**
 - Try `http://localhost` instead of `https://localhost`
-- Check if containers are running: `docker compose ps`
-- Check nginx logs: `docker compose logs nginx`
+- Check if containers are running: `podman compose ps`
+- Check nginx logs: `podman compose logs nginx`
 
 **With Authentik:**
 - Ensure Authentik is configured (see [Authentik Integration](#authentik-integration-optional))
-- Check Authentik logs: `docker compose logs authentik_server`
+- Check Authentik logs: `podman compose logs authentik_server`
 - Verify middleware is enabled in `docker-compose.yml`
 
 ### Certificate Warnings
@@ -338,8 +346,8 @@ For localhost development, certificate warnings are expected. To fix:
 
 **Reset database:**
 ```bash
-docker compose down -v
-docker compose up -d
+podman compose down -v
+podman compose up -d
 ```
 
 ⚠️ **Warning**: This will delete all data!
@@ -353,42 +361,42 @@ This means Authentik is intercepting requests but the proxy provider isn't confi
 ### Reset Authentik Admin Password
 
 ```bash
-docker compose exec authentik_server ak create_admin
+podman compose exec authentik_server ak create_admin
 ```
 
 ### View Application Logs
 
 ```bash
 # All services
-docker compose logs -f
+podman compose logs -f
 
 # Specific service
-docker compose logs -f web
-docker compose logs -f nginx
-docker compose logs -f traefik
+podman compose logs -f web
+podman compose logs -f nginx
+podman compose logs -f traefik
 ```
 
 ### Restart Services
 
 ```bash
 # Restart all
-docker compose restart
+podman compose restart
 
 # Restart specific service
-docker compose restart web
-docker compose restart nginx
+podman compose restart web
+podman compose restart nginx
 ```
 
 ### Stop Flowcase
 
 ```bash
-docker compose down
+podman compose down
 ```
 
 ### Remove Everything (Including Data)
 
 ```bash
-docker compose down -v
+podman compose down -v
 ```
 
 ⚠️ **Warning**: This permanently deletes all data!
@@ -421,12 +429,12 @@ AUTHENTIK_SECRET_KEY=<strong-random-key-50-chars>
 
 **Database backup:**
 ```bash
-docker compose exec postgresql pg_dump -U authentik authentik > backup.sql
+podman compose exec postgresql pg_dump -U authentik authentik > backup.sql
 ```
 
 **Restore:**
 ```bash
-docker compose exec -T postgresql psql -U authentik authentik < backup.sql
+podman compose exec -T postgresql psql -U authentik authentik < backup.sql
 ```
 
 ## Getting Help

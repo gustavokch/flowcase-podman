@@ -65,12 +65,12 @@ The installation script will:
 
 3. **Start Flowcase:**
    ```bash
-   docker compose up -d
+   podman compose up -d
    ```
 
 4. **View logs for credentials:**
    ```bash
-   docker compose logs -f
+   podman compose logs -f
    ```
 
 5. **Access Flowcase:**
@@ -81,13 +81,15 @@ The installation script will:
 
 Before installing Flowcase, ensure you have:
 
-- **Docker** (version 20.10 or later)
-  - [Download Docker Desktop](https://www.docker.com/get-started)
-  - Verify: `docker --version`
+- **Podman** (rootful, version 4.x or later)
+  - [Install Podman](https://podman.io/docs/installation)
+  - Verify: `podman --version`
+  - Enable the Docker-compatible API socket: `sudo systemctl enable --now podman.socket`
 
-- **Docker Compose** (version 2.0 or later)
-  - Usually included with Docker Desktop
-  - Verify: `docker compose version`
+- **Podman Compose** (`podman compose` plugin, or `podman-compose`)
+  - Verify: `podman compose version`
+
+> Docker also works (`docker compose`), but Flowcase targets Podman to avoid Docker Hub pull-rate limits.
 
 - **System Requirements:**
   - At least 2GB RAM
@@ -177,7 +179,7 @@ Authentik integration is **disabled by default**. To enable it:
 2. **Enable Authentik in docker-compose.yml**:
    - Uncomment the middleware line (line 41): `- traefik.http.routers.flowcase.middlewares=authentik@file`
    - Uncomment the flag (line 24): `--traefik-authentik`
-   - Restart: `docker compose restart web nginx traefik`
+   - Restart: `podman compose restart web nginx traefik`
 
 3. **Access Flowcase**: `https://localhost` (will redirect to Authentik for login)
 
@@ -188,22 +190,22 @@ Authentik integration is **disabled by default**. To enable it:
 
 ```bash
 # Start Flowcase
-docker compose up -d
+podman compose up -d
 
 # View logs
-docker compose logs -f
+podman compose logs -f
 
 # View logs for specific service
-docker compose logs -f web
+podman compose logs -f web
 
 # Stop Flowcase
-docker compose down
+podman compose down
 
 # Restart services
-docker compose restart
+podman compose restart
 
 # Check service status
-docker compose ps
+podman compose ps
 ```
 
 ## Architecture
@@ -223,16 +225,16 @@ Flowcase consists of the following components:
 
 ```bash
 # Check logs
-docker compose logs
+podman compose logs
 
 # Check service status
-docker compose ps
+podman compose ps
 ```
 
 ### Can't Access Application
 
-- Ensure containers are running: `docker compose ps`
-- Check nginx logs: `docker compose logs nginx`
+- Ensure containers are running: `podman compose ps`
+- Check nginx logs: `podman compose logs nginx`
 - Try `http://localhost` instead of `https://localhost`
 
 ### Certificate Warnings
@@ -247,8 +249,8 @@ For localhost development, certificate warnings are expected. For production:
 ⚠️ **Warning**: This will delete all data!
 
 ```bash
-docker compose down -v
-docker compose up -d
+podman compose down -v
+podman compose up -d
 ```
 
 For more troubleshooting help, see [SETUP.md](SETUP.md#troubleshooting).

@@ -91,7 +91,8 @@ services:
     # (1000:1000 by default)
     user: root
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Rootful Podman socket exposed at the Docker integration's default path
+      - /run/podman/podman.sock:/var/run/docker.sock
       - media:/media
       - certs:/certs
       - custom-templates:/templates

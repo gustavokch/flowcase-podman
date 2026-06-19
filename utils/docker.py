@@ -7,12 +7,32 @@ from __init__ import __version__
 docker_client = None
 
 def get_registry_auth():
-	"""Return Docker registry auth dict from env, or None if not configured."""
+	"""Return Docker registry auth dict from env, or None if not configured.
+
+	Requires an explicit FLOWCASE_DOCKER_REGISTRY in addition to credentials.
+	Without it we send no auth, so pulls from public registries (e.g. public
+	Quay repos) and mirrored base images stay anonymous instead of failing with
+	"invalid username/password" when the wrong registry's creds are presented.
+	"""
 	username = os.getenv("FLOWCASE_DOCKER_USERNAME")
 	password = os.getenv("FLOWCASE_DOCKER_PASSWORD")
-	if not username or not password:
+	registry = os.getenv("FLOWCASE_DOCKER_REGISTRY")
+	if not username or not password or not registry:
 		return None
 	return {"username": username, "password": password}
+
+def image_registry():
+	"""Namespace/registry prefix for Flowcase's own images.
+
+	Defaults to the Docker Hub namespace; set FLOWCASE_IMAGE_REGISTRY (e.g.
+	"quay.io/gustavokch") to pull them from an alternative registry and avoid
+	Docker Hub rate limits.
+	"""
+	return os.getenv("FLOWCASE_IMAGE_REGISTRY", "flowcaseweb").rstrip("/")
+
+def guac_image():
+	"""Fully-qualified Guacamole image reference for the current version."""
+	return f"{image_registry()}/flowcase-guac:{__version__}"
 
 def init_docker():
 	global docker_client
@@ -24,17 +44,21 @@ def init_docker():
 		docker_client = docker.DockerClient(base_url=os.getenv("DOCKER_HOST"))
 		docker_client.ping()
 
-		# Authenticate against the registry if credentials are provided. This
-		# covers implicit pulls done by containers.run() and raises the Docker
-		# Hub anonymous pull rate limit.
+		# Log in to a private registry only when one is explicitly configured.
+		# Public images (e.g. public Quay repos) and base images via a mirror
+		# need no auth; per-pull auth_config still covers private pulls. Always
+		# attempting a login against the default Docker Hub URL also breaks
+		# Podman's /auth endpoint, so it is gated behind an explicit registry.
 		auth = get_registry_auth()
-		if auth:
-			registry = os.getenv("FLOWCASE_DOCKER_REGISTRY", "https://index.docker.io/v1/")
+		registry = os.getenv("FLOWCASE_DOCKER_REGISTRY")
+		if auth and registry:
 			try:
 				docker_client.login(username=auth["username"], password=auth["password"], registry=registry)
 				log("INFO", f"Authenticated to Docker registry {registry} as {auth['username']}")
 			except Exception as e:
 				log("ERROR", f"Docker registry login failed: {e}")
+		elif not auth:
+			log("INFO", "No registry credentials configured; using anonymous pulls (fine for public/mirrored images)")
 
 		ensure_default_network()
 
@@ -132,6 +156,58 @@ def cleanup_containers(app=None):
 	except Exception as e:
 		print(f"Error in container cleanup: {str(e)}")
 
+def cleanup_profile_volumes(user_id=None, droplet=None):
+	"""Remove orphaned persistent-profile Docker volumes (flowcase_profile_*).
+
+	Volume names are built as flowcase_profile_<user_id>_<sanitized-template>, so:
+	- user_id: removes every volume belonging to that user (exact prefix match).
+	  Safe — a deleted user's profile volumes are all dead.
+	- droplet: removes that droplet's profile volumes ONLY when its template pins
+	  them to the droplet via {droplet_id}. Without {droplet_id} the volume may be
+	  shared across droplets by design, so it is left untouched to avoid data loss.
+	"""
+	if not docker_client:
+		print("No Docker client available, skipping profile volume cleanup")
+		return
+
+	prefix = "flowcase_profile_"
+	sanitize = lambda s: re.sub(r'[^a-zA-Z0-9._-]', '_', str(s))
+
+	user_prefix = f"{prefix}{sanitize(user_id)}_" if user_id is not None else None
+
+	droplet_fragment = None
+	if droplet is not None:
+		template = droplet.container_persistent_profile_path or ""
+		# Only droplet-pinned volumes can be safely attributed to this droplet.
+		if "{droplet_id}" in template:
+			droplet_fragment = sanitize(droplet.id)
+
+	if user_prefix is None and droplet_fragment is None:
+		return
+
+	try:
+		removed = 0
+		for volume in docker_client.volumes.list():
+			name = volume.name
+			if not name.startswith(prefix):
+				continue
+
+			matches_user = user_prefix is not None and name.startswith(user_prefix)
+			matches_droplet = droplet_fragment is not None and droplet_fragment in name[len(prefix):]
+			if not (matches_user or matches_droplet):
+				continue
+
+			try:
+				volume.remove(force=True)
+				removed += 1
+				print(f"Removed persistent-profile volume {name}")
+			except Exception as e:
+				print(f"Error removing volume {name}: {str(e)}")
+
+		print(f"Profile volume cleanup complete: {removed} volume(s) removed")
+	except Exception as e:
+		print(f"Error in profile volume cleanup: {str(e)}")
+
 def force_pull_required_images():
 	"""Force pull all required images for Flowcase (called during startup)"""
 	if not docker_client:
@@ -145,7 +221,7 @@ def force_pull_required_images():
 		required_images = [
 			# Guacamole image (always required)
 			{
-				"name": f"flowcaseweb/flowcase-guac:{__version__}",
+				"name": guac_image(),
 				"description": "Guacamole VNC Server"
 			}
 		]
@@ -203,40 +279,50 @@ def pull_images():
 		return
 		
 	from models.droplet import Droplet
-	
+
 	try:
 		# Define all required images for Flowcase
 		required_images = [
 			# Guacamole image (always required)
 			{
-				"name": f"flowcaseweb/flowcase-guac:{__version__}",
+				"name": guac_image(),
 				"description": "Guacamole VNC Server"
 			}
 		]
-		
+
 		# Add droplet images from database
 		droplets = Droplet.query.all()
 		for droplet in droplets:
 			if droplet.container_docker_image is None:
 				continue
-				
+
 			# Construct full image name
 			if droplet.container_docker_registry and "docker.io" not in droplet.container_docker_registry:
 				registry = droplet.container_docker_registry.rstrip("/")
 				image = f"{registry}/{droplet.container_docker_image}"
 			else:
 				image = droplet.container_docker_image
-				
+
 			required_images.append({
 				"name": image,
 				"description": f"Droplet: {droplet.display_name}"
 			})
 
-		# Pull all required images
+		# Snapshot of tags already present locally, so we only pull what's
+		# missing. Pulling images we already have on every sweep needlessly
+		# burns registry pull-rate quota.
+		local_tags = set()
+		for image in docker_client.images.list():
+			local_tags.update(image.tags or [])
+
+		# Pull only the required images that are not already present
 		for img_info in required_images:
 			image_name = img_info["name"]
 			description = img_info["description"]
-			
+
+			if image_name in local_tags:
+				continue
+
 			log("INFO", f"Pulling required Docker image {image_name} ({description})")
 			try:
 				# Extract tag from image name - handle multiple colons properly
@@ -248,13 +334,11 @@ def pull_images():
 				else:
 					base_image = image_name
 					tag = "latest"
-				
+
 				docker_client.images.pull(base_image, tag, auth_config=get_registry_auth())
 				log("INFO", f"Successfully pulled required Docker image {image_name} ({description})")
 			except Exception as e:
 				log("ERROR", f"Error pulling required Docker image {image_name} ({description}): {e}")
-
-		log("INFO", "Required image pull for Flowcase completed")
 
 	except Exception as e:
 		log("ERROR", f"Error in pull_images: {str(e)}")
@@ -332,7 +416,7 @@ def get_images_status():
 			{
 				"id": "guac",
 				"name": "Guacamole",
-				"image": f"flowcaseweb/flowcase-guac:{__version__}",
+				"image": guac_image(),
 				"description": "Guacamole VNC Server"
 			}
 		]

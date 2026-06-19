@@ -32,42 +32,56 @@ print_info()    { echo -e "${BLUE}ℹ $1${NC}"; }
 # longer managed by docker-compose.yml and must be cleaned up explicitly.
 LEGACY_CONTAINERS="flowcase-traefik-1 authentik_server flowcase-worker-1 flowcase-postgresql-1 flowcase-redis-1"
 
-# Check if running as root
-if [ "$EUID" -eq 0 ]; then
-    print_warning "It's recommended to run this script as a non-root user with docker permissions"
-    read -p "Continue anyway? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-fi
+# Rootful Podman's API socket (/run/podman/podman.sock) is root-owned, so the
+# engine and compose calls need root. SUDO is filled in after engine detection
+# (Podman + non-root => "sudo"); the interactive prompts and generated .env stay
+# owned by the calling user. Empty when already root or using rootless Docker.
+SUDO=""
 
 print_header "Flowcase Installation Script"
 
 # Check prerequisites
 print_info "Checking prerequisites..."
 
-# Check Docker
-if ! command -v docker &> /dev/null; then
-    print_error "Docker is not installed. Please install Docker first."
-    echo "Visit: https://www.docker.com/get-started"
+# Detect container engine (Podman preferred) and its compose command
+if command -v podman &> /dev/null; then
+    # Rootful socket needs root; auto-elevate engine + compose calls when not root.
+    [ "$EUID" -ne 0 ] && SUDO="sudo"
+    CLI="$SUDO podman"
+    if podman compose version &> /dev/null; then
+        COMPOSE="$SUDO podman compose"
+    elif command -v podman-compose &> /dev/null; then
+        COMPOSE="$SUDO podman-compose"
+    else
+        print_error "Podman found but neither 'podman compose' nor 'podman-compose' is available."
+        exit 1
+    fi
+    print_success "Podman is installed ($COMPOSE)"
+    # Flowcase talks to the rootful Docker-compatible API socket (root-owned, so
+    # test it with $SUDO — an unprivileged 'test -S' gives a false negative).
+    if ! $SUDO test -S /run/podman/podman.sock; then
+        print_warning "/run/podman/podman.sock not found. Enable it with: sudo systemctl enable --now podman.socket"
+    fi
+elif command -v docker &> /dev/null; then
+    CLI=docker
+    if ! docker compose version &> /dev/null; then
+        print_error "Docker Compose is not installed or not working."
+        exit 1
+    fi
+    COMPOSE="docker compose"
+    print_warning "Using Docker. Flowcase now targets Podman; Docker Hub pull-rate limits may apply."
+else
+    print_error "No container engine found. Install Podman (recommended) or Docker first."
+    echo "Podman: https://podman.io/docs/installation"
     exit 1
 fi
-print_success "Docker is installed"
 
-# Check Docker Compose
-if ! docker compose version &> /dev/null; then
-    print_error "Docker Compose is not installed or not working."
+# Check the engine is reachable
+if ! $CLI info &> /dev/null; then
+    print_error "$CLI is not responding. Is the service running?"
     exit 1
 fi
-print_success "Docker Compose is installed"
-
-# Check if Docker daemon is running
-if ! docker info &> /dev/null; then
-    print_error "Docker daemon is not running. Please start Docker."
-    exit 1
-fi
-print_success "Docker daemon is running"
+print_success "$CLI is running"
 
 # Check Tailscale (required for the bind IP)
 if ! command -v tailscale &> /dev/null; then
@@ -84,7 +98,7 @@ fi
 
 # Optional: tear down + recreate the existing stack first
 print_header "Existing Stack"
-if [ -n "$(docker compose ps -q 2>/dev/null)" ] || docker ps -a --format '{{.Names}}' | grep -qE "flowcase|authentik"; then
+if [ -n "$($COMPOSE ps -q 2>/dev/null)" ] || $CLI ps -a --format '{{.Names}}' | grep -qE "flowcase|authentik"; then
     print_warning "An existing Flowcase stack (or legacy Traefik/Authentik containers) was detected."
     read -p "Tear it down and recreate from scratch? (y/N) " -n 1 -r
     echo
@@ -99,12 +113,12 @@ if [ -n "$(docker compose ps -q 2>/dev/null)" ] || docker ps -a --format '{{.Nam
             print_info "Data volumes will be preserved."
         fi
         print_info "Stopping current compose project..."
-        docker compose down $DOWN_FLAGS || true
+        $COMPOSE down $DOWN_FLAGS || true
         # Remove any leftover legacy containers not owned by this compose file.
         for c in $LEGACY_CONTAINERS; do
-            if docker ps -a --format '{{.Names}}' | grep -qx "$c"; then
+            if $CLI ps -a --format '{{.Names}}' | grep -qx "$c"; then
                 print_info "Removing legacy container: $c"
-                docker rm -f "$c" || true
+                $CLI rm -f "$c" || true
             fi
         done
         print_success "Teardown complete"
@@ -180,10 +194,17 @@ PG_PASS=$PG_PASS
 # Authentik Configuration
 AUTHENTIK_SECRET_KEY=$AUTHENTIK_SECRET_KEY
 
-# Docker Hub Authentication (optional, but recommended to avoid pull rate limits)
-# Create a Personal Access Token at https://hub.docker.com/settings/security
-# FLOWCASE_DOCKER_USERNAME=your-dockerhub-username
-# FLOWCASE_DOCKER_PASSWORD=your-dockerhub-access-token
+# Container engine: rootful Podman's Docker-compatible API socket
+DOCKER_HOST=unix:///run/podman/podman.sock
+
+# Pull Flowcase's own images (flowcase-guac, etc.) from an alternative registry
+# to avoid Docker Hub rate limits. Leave unset to use Docker Hub (flowcaseweb).
+FLOWCASE_IMAGE_REGISTRY=quay.io/gustavokch
+
+# Registry credentials (only needed for PRIVATE image repos; public Quay repos
+# need none). For Docker Hub, create a token at https://hub.docker.com/settings/security
+# FLOWCASE_DOCKER_USERNAME=your-registry-username
+# FLOWCASE_DOCKER_PASSWORD=your-registry-token
 # FLOWCASE_DOCKER_REGISTRY=https://index.docker.io/v1/
 EOF
     print_success ".env file created"
@@ -194,10 +215,14 @@ else
         print_info "Added TS_IP to existing .env"
     fi
 
-    # Add Docker Hub auth placeholders when keeping an old .env
-    if ! grep -q "FLOWCASE_DOCKER_USERNAME" .env; then
-        printf "\n# Docker Hub Authentication (optional, but recommended to avoid pull rate limits)\n# Create a Personal Access Token at https://hub.docker.com/settings/security\n# FLOWCASE_DOCKER_USERNAME=your-dockerhub-username\n# FLOWCASE_DOCKER_PASSWORD=your-dockerhub-access-token\n# FLOWCASE_DOCKER_REGISTRY=https://index.docker.io/v1/\n" >> .env
-        print_info "Added Docker Hub auth placeholders to existing .env"
+    # Ensure the Podman socket + image-registry settings exist on an old .env
+    if ! grep -q "^DOCKER_HOST=" .env; then
+        printf "\n# Container engine: rootful Podman's Docker-compatible API socket\nDOCKER_HOST=unix:///run/podman/podman.sock\n" >> .env
+        print_info "Added DOCKER_HOST to existing .env"
+    fi
+    if ! grep -q "FLOWCASE_IMAGE_REGISTRY" .env; then
+        printf "\n# Pull Flowcase images from an alternative registry to avoid Docker Hub limits\nFLOWCASE_IMAGE_REGISTRY=quay.io/gustavokch\n" >> .env
+        print_info "Added FLOWCASE_IMAGE_REGISTRY to existing .env"
     fi
 fi
 
@@ -205,7 +230,7 @@ fi
 print_header "Starting Flowcase"
 print_info "This may take a few minutes on first run..."
 
-docker compose up -d
+$COMPOSE up -d
 
 print_success "Containers started"
 
@@ -215,7 +240,7 @@ sleep 10
 
 # Check service status
 print_header "Service Status"
-docker compose ps
+$COMPOSE ps
 
 # Display access information
 print_header "Installation Complete!"
@@ -226,13 +251,13 @@ echo "Access Information:"
 echo "  - Flowcase: http://${TS_IP}:5544"
 echo ""
 print_info "Default admin credentials will be displayed in the logs."
-echo "View logs with: docker compose logs -f"
+echo "View logs with: $COMPOSE logs -f"
 echo ""
 print_warning "Look for the default admin username and password in the logs!"
 echo ""
-print_info "To view logs: docker compose logs -f"
-print_info "To stop: docker compose down"
-print_info "To restart: docker compose restart"
+print_info "To view logs: $COMPOSE logs -f"
+print_info "To stop: $COMPOSE down"
+print_info "To restart: $COMPOSE restart"
 echo ""
 print_info "For detailed setup instructions, see SETUP.md"
 echo ""
@@ -240,7 +265,7 @@ echo ""
 # Show logs for a few seconds to catch credentials
 print_info "Showing recent logs (look for default credentials)..."
 echo ""
-docker compose logs --tail=50 web | grep -A 10 "Created default users" || true
+$COMPOSE logs --tail=50 web | grep -A 10 "Created default users" || true
 echo ""
 
 print_success "Installation complete! 🎉"
