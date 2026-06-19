@@ -11,16 +11,19 @@ services:
     build:
       context: .
       dockerfile: web.Dockerfile
-    image: flowcaseweb/flowcase
+    image: quay.io/gustavokch/flowcase
     container_name: flowcase-web
     restart: unless-stopped
     volumes:
       - flowcase-data:/flowcase/data
       - flowcase-nginx-data:/flowcase/nginx
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Rootful Podman's Docker-compatible API socket
+      - /run/podman/podman.sock:/run/podman/podman.sock
     environment:
       - FLASK_APP=run.py
       - FLASK_DEBUG=0
+      - DOCKER_HOST=unix:///run/podman/podman.sock
+      - FLOWCASE_IMAGE_REGISTRY=${FLOWCASE_IMAGE_REGISTRY:-}
       - FLOWCASE_DOCKER_USERNAME=${FLOWCASE_DOCKER_USERNAME:-}
       - FLOWCASE_DOCKER_PASSWORD=${FLOWCASE_DOCKER_PASSWORD:-}
       - FLOWCASE_DOCKER_REGISTRY=${FLOWCASE_DOCKER_REGISTRY:-}

@@ -28,7 +28,8 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Rootful Podman socket exposed at the Docker provider's default path
+      - /run/podman/podman.sock:/var/run/docker.sock
       # assumes that host contains public ca certs or root ca certs for self signed certificates
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
       - ./traefik/dynamic_configs:/dynamic_configs:ro

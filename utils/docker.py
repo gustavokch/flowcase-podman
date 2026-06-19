@@ -14,6 +14,19 @@ def get_registry_auth():
 		return None
 	return {"username": username, "password": password}
 
+def image_registry():
+	"""Namespace/registry prefix for Flowcase's own images.
+
+	Defaults to the Docker Hub namespace; set FLOWCASE_IMAGE_REGISTRY (e.g.
+	"quay.io/gustavokch") to pull them from an alternative registry and avoid
+	Docker Hub rate limits.
+	"""
+	return os.getenv("FLOWCASE_IMAGE_REGISTRY", "flowcaseweb").rstrip("/")
+
+def guac_image():
+	"""Fully-qualified Guacamole image reference for the current version."""
+	return f"{image_registry()}/flowcase-guac:{__version__}"
+
 def init_docker():
 	global docker_client
 
@@ -199,7 +212,7 @@ def force_pull_required_images():
 		required_images = [
 			# Guacamole image (always required)
 			{
-				"name": f"flowcaseweb/flowcase-guac:{__version__}",
+				"name": guac_image(),
 				"description": "Guacamole VNC Server"
 			}
 		]
@@ -257,40 +270,50 @@ def pull_images():
 		return
 		
 	from models.droplet import Droplet
-	
+
 	try:
 		# Define all required images for Flowcase
 		required_images = [
 			# Guacamole image (always required)
 			{
-				"name": f"flowcaseweb/flowcase-guac:{__version__}",
+				"name": guac_image(),
 				"description": "Guacamole VNC Server"
 			}
 		]
-		
+
 		# Add droplet images from database
 		droplets = Droplet.query.all()
 		for droplet in droplets:
 			if droplet.container_docker_image is None:
 				continue
-				
+
 			# Construct full image name
 			if droplet.container_docker_registry and "docker.io" not in droplet.container_docker_registry:
 				registry = droplet.container_docker_registry.rstrip("/")
 				image = f"{registry}/{droplet.container_docker_image}"
 			else:
 				image = droplet.container_docker_image
-				
+
 			required_images.append({
 				"name": image,
 				"description": f"Droplet: {droplet.display_name}"
 			})
 
-		# Pull all required images
+		# Snapshot of tags already present locally, so we only pull what's
+		# missing. Pulling images we already have on every sweep needlessly
+		# burns registry pull-rate quota.
+		local_tags = set()
+		for image in docker_client.images.list():
+			local_tags.update(image.tags or [])
+
+		# Pull only the required images that are not already present
 		for img_info in required_images:
 			image_name = img_info["name"]
 			description = img_info["description"]
-			
+
+			if image_name in local_tags:
+				continue
+
 			log("INFO", f"Pulling required Docker image {image_name} ({description})")
 			try:
 				# Extract tag from image name - handle multiple colons properly
@@ -302,13 +325,11 @@ def pull_images():
 				else:
 					base_image = image_name
 					tag = "latest"
-				
+
 				docker_client.images.pull(base_image, tag, auth_config=get_registry_auth())
 				log("INFO", f"Successfully pulled required Docker image {image_name} ({description})")
 			except Exception as e:
 				log("ERROR", f"Error pulling required Docker image {image_name} ({description}): {e}")
-
-		log("INFO", "Required image pull for Flowcase completed")
 
 	except Exception as e:
 		log("ERROR", f"Error in pull_images: {str(e)}")
@@ -386,7 +407,7 @@ def get_images_status():
 			{
 				"id": "guac",
 				"name": "Guacamole",
-				"image": f"flowcaseweb/flowcase-guac:{__version__}",
+				"image": guac_image(),
 				"description": "Guacamole VNC Server"
 			}
 		]

@@ -54,11 +54,15 @@ def on_starting(server):
 	
 	cleanup_containers(temp_app)
 	
-	# start background thread for periodic image checks
+	# start background thread for periodic image checks.
+	# pull_images() only fetches images missing locally, so this just backfills
+	# anything added since startup. A long interval avoids hammering the registry
+	# pull-rate limit (the previous 60s sweep was the main quota burner).
+	PULL_INTERVAL_SECONDS = 6 * 60 * 60  # 6 hours
 	def pull_images_worker():
 		while True:
 			try:
-				time.sleep(60)
+				time.sleep(PULL_INTERVAL_SECONDS)
 				with temp_app.app_context():
 					pull_images()
 			except Exception as e:

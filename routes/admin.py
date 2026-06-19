@@ -789,9 +789,8 @@ def api_admin_pull_image():
 
 	# Handle special guac droplet
 	if droplet_id == "guac":
-		from __init__ import __version__
 		registry = "https://index.docker.io/v1/"
-		image_name = f"flowcaseweb/flowcase-guac:{__version__}"
+		image_name = utils.docker.guac_image()
 	else:
 		# Get droplet info
 		droplet = Droplet.query.filter_by(id=droplet_id).first()

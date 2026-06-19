@@ -3,17 +3,20 @@ services:
     build:
       context: .
       dockerfile: web.Dockerfile
-    image: flowcaseweb/flowcase:develop
+    image: quay.io/gustavokch/flowcase:develop
     container_name: flowcase-web-dev
     restart: unless-stopped
     volumes:
       - .:/flowcase
       - flowcase-data:/flowcase/data
       - flowcase-nginx-data:/flowcase/nginx
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Rootful Podman's Docker-compatible API socket
+      - /run/podman/podman.sock:/run/podman/podman.sock
     environment:
       - FLASK_APP=run.py
       - FLASK_DEBUG=1
+      - DOCKER_HOST=unix:///run/podman/podman.sock
+      - FLOWCASE_IMAGE_REGISTRY=${FLOWCASE_IMAGE_REGISTRY:-}
     ports:
       - "5000"
     networks:
