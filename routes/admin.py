@@ -302,7 +302,11 @@ def api_admin_delete_droplet():
 	droplet = Droplet.query.filter_by(id=droplet_id).first()
 	if not droplet:
 		return jsonify({"success": False, "error": "Droplet not found"}), 404
- 
+
+	# Remove droplet-pinned persistent-profile volumes before deleting the record
+	if utils.docker.is_docker_available():
+		utils.docker.cleanup_profile_volumes(droplet=droplet)
+
 	db.session.delete(droplet)
 	db.session.commit()
  
@@ -429,7 +433,11 @@ def api_admin_delete_user():
 	
 	if user.protected:
 		return jsonify({"success": False, "error": "This user is protected. Protected users cannot be deleted."}), 400
-	
+
+	# Remove this user's persistent-profile volumes
+	if utils.docker.is_docker_available():
+		utils.docker.cleanup_profile_volumes(user_id=user_id)
+
 	db.session.delete(user)
 	db.session.commit()
  

@@ -132,6 +132,58 @@ def cleanup_containers(app=None):
 	except Exception as e:
 		print(f"Error in container cleanup: {str(e)}")
 
+def cleanup_profile_volumes(user_id=None, droplet=None):
+	"""Remove orphaned persistent-profile Docker volumes (flowcase_profile_*).
+
+	Volume names are built as flowcase_profile_<user_id>_<sanitized-template>, so:
+	- user_id: removes every volume belonging to that user (exact prefix match).
+	  Safe — a deleted user's profile volumes are all dead.
+	- droplet: removes that droplet's profile volumes ONLY when its template pins
+	  them to the droplet via {droplet_id}. Without {droplet_id} the volume may be
+	  shared across droplets by design, so it is left untouched to avoid data loss.
+	"""
+	if not docker_client:
+		print("No Docker client available, skipping profile volume cleanup")
+		return
+
+	prefix = "flowcase_profile_"
+	sanitize = lambda s: re.sub(r'[^a-zA-Z0-9._-]', '_', str(s))
+
+	user_prefix = f"{prefix}{sanitize(user_id)}_" if user_id is not None else None
+
+	droplet_fragment = None
+	if droplet is not None:
+		template = droplet.container_persistent_profile_path or ""
+		# Only droplet-pinned volumes can be safely attributed to this droplet.
+		if "{droplet_id}" in template:
+			droplet_fragment = sanitize(droplet.id)
+
+	if user_prefix is None and droplet_fragment is None:
+		return
+
+	try:
+		removed = 0
+		for volume in docker_client.volumes.list():
+			name = volume.name
+			if not name.startswith(prefix):
+				continue
+
+			matches_user = user_prefix is not None and name.startswith(user_prefix)
+			matches_droplet = droplet_fragment is not None and droplet_fragment in name[len(prefix):]
+			if not (matches_user or matches_droplet):
+				continue
+
+			try:
+				volume.remove(force=True)
+				removed += 1
+				print(f"Removed persistent-profile volume {name}")
+			except Exception as e:
+				print(f"Error removing volume {name}: {str(e)}")
+
+		print(f"Profile volume cleanup complete: {removed} volume(s) removed")
+	except Exception as e:
+		print(f"Error in profile volume cleanup: {str(e)}")
+
 def force_pull_required_images():
 	"""Force pull all required images for Flowcase (called during startup)"""
 	if not docker_client:

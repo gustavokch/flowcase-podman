@@ -238,30 +238,6 @@ def request_new_instance():
 	if not image_exists:
 		log("WARNING", f"Docker image {droplet.container_docker_image} not found. Please wait a few minutes and try again.")
 		return jsonify({"success": False, "error": "Docker image not found. Image might still be downloading."}), 400
-	
-		"""
-		try:
-			# Use the existing pull_single_image function with timeout
-			def pull_with_timeout():
-				return utils.docker.pull_single_image(
-					droplet.container_docker_registry, 
-					droplet.container_docker_image
-				)
-			
-			success, message = timeout_wrapper(pull_with_timeout, timeout_seconds=300)
-			
-			if not success:
-				if "timed out" in message:
-					return jsonify({"success": False, "error": "Image download timed out. Please try again or download manually from the admin panel."}), 408
-				else:
-					log("ERROR", f"Failed to pull Docker image {image_name}: {message}")
-					return jsonify({"success": False, "error": f"Failed to download Docker image. Error: {message}"}), 400
-			
-			log("INFO", f"Successfully pulled Docker image {image_name}")
-		except Exception as e:
-			log("ERROR", f"Failed to pull Docker image {image_name}: {str(e)}")
-			return jsonify({"success": False, "error": f"Failed to download Docker image. Error: {str(e)}"}), 400
-		"""
 
 	# Create a new instance
 	instance = DropletInstance(droplet_id=droplet_id, user_id=current_user.id)
@@ -273,8 +249,8 @@ def request_new_instance():
  
 	name = f"flowcase_generated_{instance.id}"
  
-	request_resolution = request.json.get('resolution')
-	if len(request_resolution) < 10 and re.match(r"[0-9]+x[0-9]+", request_resolution):
+	request_resolution = request.json.get('resolution') or ""
+	if len(request_resolution) < 10 and re.match(r"^[0-9]+x[0-9]+$", request_resolution):
 		resolution = request_resolution
 	else:
 		resolution = "1280x720"
@@ -294,7 +270,9 @@ def request_new_instance():
 		
 		# Create a safe volume name (Docker volume names have restrictions)
 		volume_name = re.sub(r'[^a-zA-Z0-9._-]', '_', volume_name)
-		volume_name = f"flowcase_profile_{volume_name}"
+		# Always namespace by user id so templates that omit {user_id}/{user_name}
+		# (e.g. a constant path) can never share one volume across users.
+		volume_name = f"flowcase_profile_{current_user.id}_{volume_name}"
 		
 		# Mount to user's home directory in container
 		container_path = "/home/flowcase-user"
