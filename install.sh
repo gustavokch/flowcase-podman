@@ -32,15 +32,11 @@ print_info()    { echo -e "${BLUE}ℹ $1${NC}"; }
 # longer managed by docker-compose.yml and must be cleaned up explicitly.
 LEGACY_CONTAINERS="flowcase-traefik-1 authentik_server flowcase-worker-1 flowcase-postgresql-1 flowcase-redis-1"
 
-# Check if running as root
-if [ "$EUID" -eq 0 ]; then
-    print_warning "It's recommended to run this script as a non-root user with container engine permissions"
-    read -p "Continue anyway? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-fi
+# Rootful Podman's API socket (/run/podman/podman.sock) is root-owned, so the
+# engine and compose calls need root. SUDO is filled in after engine detection
+# (Podman + non-root => "sudo"); the interactive prompts and generated .env stay
+# owned by the calling user. Empty when already root or using rootless Docker.
+SUDO=""
 
 print_header "Flowcase Installation Script"
 
@@ -49,18 +45,21 @@ print_info "Checking prerequisites..."
 
 # Detect container engine (Podman preferred) and its compose command
 if command -v podman &> /dev/null; then
-    CLI=podman
+    # Rootful socket needs root; auto-elevate engine + compose calls when not root.
+    [ "$EUID" -ne 0 ] && SUDO="sudo"
+    CLI="$SUDO podman"
     if podman compose version &> /dev/null; then
-        COMPOSE="podman compose"
+        COMPOSE="$SUDO podman compose"
     elif command -v podman-compose &> /dev/null; then
-        COMPOSE="podman-compose"
+        COMPOSE="$SUDO podman-compose"
     else
         print_error "Podman found but neither 'podman compose' nor 'podman-compose' is available."
         exit 1
     fi
     print_success "Podman is installed ($COMPOSE)"
-    # Flowcase talks to the rootful Docker-compatible API socket
-    if [ ! -S /run/podman/podman.sock ]; then
+    # Flowcase talks to the rootful Docker-compatible API socket (root-owned, so
+    # test it with $SUDO — an unprivileged 'test -S' gives a false negative).
+    if ! $SUDO test -S /run/podman/podman.sock; then
         print_warning "/run/podman/podman.sock not found. Enable it with: sudo systemctl enable --now podman.socket"
     fi
 elif command -v docker &> /dev/null; then
