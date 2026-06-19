@@ -37,19 +37,21 @@ def init_docker():
 		docker_client = docker.DockerClient(base_url=os.getenv("DOCKER_HOST"))
 		docker_client.ping()
 
-		# Authenticate against the registry if credentials are provided. This
-		# covers implicit pulls done by containers.run() and raises the Docker
-		# Hub anonymous pull rate limit.
+		# Log in to a private registry only when one is explicitly configured.
+		# Public images (e.g. public Quay repos) and base images via a mirror
+		# need no auth; per-pull auth_config still covers private pulls. Always
+		# attempting a login against the default Docker Hub URL also breaks
+		# Podman's /auth endpoint, so it is gated behind an explicit registry.
 		auth = get_registry_auth()
-		if auth:
-			registry = os.getenv("FLOWCASE_DOCKER_REGISTRY", "https://index.docker.io/v1/")
+		registry = os.getenv("FLOWCASE_DOCKER_REGISTRY")
+		if auth and registry:
 			try:
 				docker_client.login(username=auth["username"], password=auth["password"], registry=registry)
 				log("INFO", f"Authenticated to Docker registry {registry} as {auth['username']}")
 			except Exception as e:
 				log("ERROR", f"Docker registry login failed: {e}")
-		else:
-			log("WARNING", "No Docker registry credentials configured (FLOWCASE_DOCKER_USERNAME/PASSWORD); pulls will be anonymous and subject to Docker Hub rate limits")
+		elif not auth:
+			log("INFO", "No registry credentials configured; using anonymous pulls (fine for public/mirrored images)")
 
 		ensure_default_network()
 

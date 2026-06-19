@@ -28,7 +28,11 @@ services:
       - FLOWCASE_DOCKER_PASSWORD=${FLOWCASE_DOCKER_PASSWORD:-}
       - FLOWCASE_DOCKER_REGISTRY=${FLOWCASE_DOCKER_REGISTRY:-}
     networks:
-      - default_network
+      default_network:
+        # nginx proxies to http://web:5000; Podman registers the container name,
+        # not the compose service name, so expose "web" as an explicit alias.
+        aliases:
+          - web
     command: python run.py # --traefik-authentik # --registry-lock https://my-private-locked-registry.example
 
   nginx:

@@ -60,13 +60,19 @@ def on_starting(server):
 	# pull-rate limit (the previous 60s sweep was the main quota burner).
 	PULL_INTERVAL_SECONDS = 6 * 60 * 60  # 6 hours
 	def pull_images_worker():
+		# Pull missing images once at startup, then re-check every 6h. Both
+		# pulls only fetch images not already present locally.
+		first = True
 		while True:
 			try:
-				time.sleep(PULL_INTERVAL_SECONDS)
+				if not first:
+					time.sleep(PULL_INTERVAL_SECONDS)
+				first = False
 				with temp_app.app_context():
 					pull_images()
 			except Exception as e:
 				print(f"Error in pull_images_worker: {e}")
+				time.sleep(PULL_INTERVAL_SECONDS)
 	
 	thread = threading.Thread(target=pull_images_worker, daemon=True)
 	thread.start()
