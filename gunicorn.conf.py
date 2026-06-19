@@ -18,7 +18,11 @@ worker_connections = 1000
 max_requests = 1000
 max_requests_jitter = 50
 
-timeout = 30
+# Manual image pulls (/api/admin/images/pull) and pull-on-launch run a blocking
+# images.pull() inside the request worker. A large first pull (multi-hundred-MB
+# droplet images) exceeds the default 30s, so the master killed the worker mid-
+# download ("WORKER TIMEOUT") and the image never landed. Allow long pulls.
+timeout = 600
 keepalive = 2
 
 accesslog = "-"
