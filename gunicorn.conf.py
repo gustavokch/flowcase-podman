@@ -2,6 +2,11 @@ import os
 import multiprocessing
 import threading
 import time
+from dotenv import load_dotenv
+
+# Load .env before any os.getenv (e.g. registry credentials in init_docker)
+load_dotenv()
+
 from utils.docker import pull_images
 
 bind = "0.0.0.0:5000"

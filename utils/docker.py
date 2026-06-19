@@ -35,6 +35,8 @@ def init_docker():
 				log("INFO", f"Authenticated to Docker registry {registry} as {auth['username']}")
 			except Exception as e:
 				log("ERROR", f"Docker registry login failed: {e}")
+		else:
+			log("WARNING", "No Docker registry credentials configured (FLOWCASE_DOCKER_USERNAME/PASSWORD); pulls will be anonymous and subject to Docker Hub rate limits")
 
 		ensure_default_network()
 
