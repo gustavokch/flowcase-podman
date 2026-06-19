@@ -37,6 +37,13 @@ Before installing Flowcase, ensure you have:
    - Install: https://podman.io/docs/installation
    - Verify: `podman --version`
    - Enable the Docker-compatible API socket: `sudo systemctl enable --now podman.socket`
+   - **Networking requires `netavark` + `aardvark-dns` ≥ 1.5.** Ubuntu 24.04 ships
+     the broken **1.4.0**, where `aardvark-dns` fails to serve names for networks
+     created after it starts — nginx then crash-loops with
+     `host not found in upstream "web"`. Check with `podman info | grep -A2 aardvark`.
+     If it shows 1.4.x, install the v1.14.0 binaries from the
+     `containers/netavark` and `containers/aardvark-dns` GitHub releases into
+     `/usr/lib/podman/`, then `sudo pkill aardvark-dns` and recreate the stack.
 
 2. **Podman Compose** (`podman compose` plugin, or `podman-compose`)
    - Verify: `podman compose version`
