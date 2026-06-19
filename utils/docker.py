@@ -7,10 +7,17 @@ from __init__ import __version__
 docker_client = None
 
 def get_registry_auth():
-	"""Return Docker registry auth dict from env, or None if not configured."""
+	"""Return Docker registry auth dict from env, or None if not configured.
+
+	Requires an explicit FLOWCASE_DOCKER_REGISTRY in addition to credentials.
+	Without it we send no auth, so pulls from public registries (e.g. public
+	Quay repos) and mirrored base images stay anonymous instead of failing with
+	"invalid username/password" when the wrong registry's creds are presented.
+	"""
 	username = os.getenv("FLOWCASE_DOCKER_USERNAME")
 	password = os.getenv("FLOWCASE_DOCKER_PASSWORD")
-	if not username or not password:
+	registry = os.getenv("FLOWCASE_DOCKER_REGISTRY")
+	if not username or not password or not registry:
 		return None
 	return {"username": username, "password": password}
 
