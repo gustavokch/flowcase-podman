@@ -2,6 +2,10 @@
 
 # Flowcase Installation Script
 # This script automates the setup of Flowcase
+#
+# Local deployment notes:
+#   - Traefik + Authentik (HTTPS / Let's Encrypt) are bypassed.
+#   - nginx is published on the Tailscale interface IP, port 5544, only.
 
 set -e
 
@@ -19,24 +23,17 @@ print_header() {
     echo -e "${BLUE}========================================${NC}"
 }
 
-print_success() {
-    echo -e "${GREEN}✓ $1${NC}"
-}
+print_success() { echo -e "${GREEN}✓ $1${NC}"; }
+print_error()   { echo -e "${RED}✗ $1${NC}"; }
+print_warning() { echo -e "${YELLOW}⚠ $1${NC}"; }
+print_info()    { echo -e "${BLUE}ℹ $1${NC}"; }
 
-print_error() {
-    echo -e "${RED}✗ $1${NC}"
-}
-
-print_warning() {
-    echo -e "${YELLOW}⚠ $1${NC}"
-}
-
-print_info() {
-    echo -e "${BLUE}ℹ $1${NC}"
-}
+# Legacy containers from the pre-bypass stack (Traefik/Authentik) that are no
+# longer managed by docker-compose.yml and must be cleaned up explicitly.
+LEGACY_CONTAINERS="flowcase-traefik-1 authentik_server flowcase-worker-1 flowcase-postgresql-1 flowcase-redis-1"
 
 # Check if running as root
-if [ "$EUID" -eq 0 ]; then 
+if [ "$EUID" -eq 0 ]; then
     print_warning "It's recommended to run this script as a non-root user with docker permissions"
     read -p "Continue anyway? (y/N) " -n 1 -r
     echo
@@ -72,6 +69,72 @@ if ! docker info &> /dev/null; then
 fi
 print_success "Docker daemon is running"
 
+# Check Tailscale (required for the bind IP)
+if ! command -v tailscale &> /dev/null; then
+    print_warning "Tailscale CLI not found; you will need to enter the bind IP manually."
+    DETECTED_TS_IP=""
+else
+    DETECTED_TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+    if [ -n "$DETECTED_TS_IP" ]; then
+        print_success "Tailscale IP detected: $DETECTED_TS_IP"
+    else
+        print_warning "Tailscale installed but no IPv4 address found (is it up?)."
+    fi
+fi
+
+# Optional: tear down + recreate the existing stack first
+print_header "Existing Stack"
+if [ -n "$(docker compose ps -q 2>/dev/null)" ] || docker ps -a --format '{{.Names}}' | grep -qE "flowcase|authentik"; then
+    print_warning "An existing Flowcase stack (or legacy Traefik/Authentik containers) was detected."
+    read -p "Tear it down and recreate from scratch? (y/N) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        read -p "Also delete data volumes? THIS DESTROYS ALL DATA (y/N) " -n 1 -r
+        echo
+        DOWN_FLAGS="--remove-orphans"
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            DOWN_FLAGS="--remove-orphans --volumes"
+            print_warning "Data volumes will be removed."
+        else
+            print_info "Data volumes will be preserved."
+        fi
+        print_info "Stopping current compose project..."
+        docker compose down $DOWN_FLAGS || true
+        # Remove any leftover legacy containers not owned by this compose file.
+        for c in $LEGACY_CONTAINERS; do
+            if docker ps -a --format '{{.Names}}' | grep -qx "$c"; then
+                print_info "Removing legacy container: $c"
+                docker rm -f "$c" || true
+            fi
+        done
+        print_success "Teardown complete"
+    else
+        print_info "Leaving existing stack in place (services will be recreated as needed)."
+    fi
+else
+    print_info "No existing stack detected."
+fi
+
+# Generate random passwords
+generate_password()   { openssl rand -base64 24 | tr -d "=+/" | cut -c1-24; }
+generate_secret_key() { openssl rand -base64 32 | tr -d "=+/" | cut -c1-50; }
+
+# Configuration
+print_header "Configuration"
+
+# Tailscale bind IP
+read -p "Enter the Tailscale bind IP (default: ${DETECTED_TS_IP:-none}): " TS_IP
+TS_IP=${TS_IP:-$DETECTED_TS_IP}
+if [ -z "$TS_IP" ]; then
+    print_error "No bind IP provided and none could be detected. Aborting."
+    exit 1
+fi
+print_info "nginx will listen on ${TS_IP}:5544 (HTTP only, HTTPS/Let's Encrypt bypassed)"
+
+# Domain is kept for compatibility only (HTTPS path is bypassed)
+read -p "Enter your domain (default: localhost): " DOMAIN
+DOMAIN=${DOMAIN:-localhost}
+
 # Check if .env already exists
 if [ -f .env ]; then
     print_warning ".env file already exists"
@@ -86,48 +149,13 @@ if [ -f .env ]; then
     fi
 fi
 
-# Generate random passwords
-generate_password() {
-    openssl rand -base64 24 | tr -d "=+/" | cut -c1-24
-}
-
-generate_secret_key() {
-    openssl rand -base64 32 | tr -d "=+/" | cut -c1-50
-}
-
-# Configuration
-print_header "Configuration"
-
-# Domain
-read -p "Enter your domain (default: localhost): " DOMAIN
-DOMAIN=${DOMAIN:-localhost}
-print_info "Domain: $DOMAIN"
-
-# Admin Email
-read -p "Enter admin email for Let's Encrypt (default: admin@example.com): " ADMIN_EMAIL
-ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
-print_info "Admin Email: $ADMIN_EMAIL"
-
-# CA Server
-if [ "$DOMAIN" = "localhost" ]; then
-    CA_SERVER="https://acme-staging-v02.api.letsencrypt.org/directory"
-    print_info "Using Let's Encrypt staging (for localhost)"
-else
-    read -p "Use Let's Encrypt production? (Y/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        CA_SERVER="https://acme-staging-v02.api.letsencrypt.org/directory"
-        print_info "Using Let's Encrypt staging"
-    else
-        CA_SERVER="https://acme-v02.api.letsencrypt.org/directory"
-        print_info "Using Let's Encrypt production"
-    fi
-fi
-
-# Generate passwords
+# Generate passwords (retained so Authentik can be re-enabled later)
 print_info "Generating secure passwords..."
 PG_PASS=$(generate_password)
 AUTHENTIK_SECRET_KEY=$(generate_secret_key)
+# HTTPS bypassed: staging CA kept as a harmless placeholder.
+CA_SERVER="https://acme-staging-v02.api.letsencrypt.org/directory"
+ADMIN_EMAIL="admin@example.com"
 
 # Create .env file
 if [ "$SKIP_ENV" != "true" ]; then
@@ -139,7 +167,10 @@ if [ "$SKIP_ENV" != "true" ]; then
 # Domain Configuration
 DOMAIN=$DOMAIN
 
-# Traefik Configuration
+# Tailscale interface bind IP (nginx published here only, port 5544)
+TS_IP=$TS_IP
+
+# Traefik Configuration (HTTPS/Let's Encrypt bypassed in docker-compose.yml)
 ADMIN_EMAIL=$ADMIN_EMAIL
 CA_SERVER=$CA_SERVER
 
@@ -148,27 +179,26 @@ PG_PASS=$PG_PASS
 
 # Authentik Configuration
 AUTHENTIK_SECRET_KEY=$AUTHENTIK_SECRET_KEY
+
+# Docker Hub Authentication (optional, but recommended to avoid pull rate limits)
+# Create a Personal Access Token at https://hub.docker.com/settings/security
+# FLOWCASE_DOCKER_USERNAME=your-dockerhub-username
+# FLOWCASE_DOCKER_PASSWORD=your-dockerhub-access-token
+# FLOWCASE_DOCKER_REGISTRY=https://index.docker.io/v1/
 EOF
     print_success ".env file created"
-fi
-
-# Display credentials
-print_header "Generated Credentials"
-echo "PostgreSQL Password: $PG_PASS"
-echo "Authentik Secret Key: $AUTHENTIK_SECRET_KEY"
-echo ""
-print_warning "Save these credentials securely!"
-echo ""
-
-# Ask about Authentik
-read -p "Do you want to enable Authentik authentication? (y/N): " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    ENABLE_AUTHENTIK=true
-    print_info "Authentik will be enabled after initial setup"
 else
-    ENABLE_AUTHENTIK=false
-    print_info "Authentik middleware is disabled (you can enable it later)"
+    # Ensure TS_IP exists even when keeping an old .env
+    if ! grep -q "^TS_IP=" .env; then
+        printf "\n# Tailscale interface bind IP (nginx published here only, port 5544)\nTS_IP=%s\n" "$TS_IP" >> .env
+        print_info "Added TS_IP to existing .env"
+    fi
+
+    # Add Docker Hub auth placeholders when keeping an old .env
+    if ! grep -q "FLOWCASE_DOCKER_USERNAME" .env; then
+        printf "\n# Docker Hub Authentication (optional, but recommended to avoid pull rate limits)\n# Create a Personal Access Token at https://hub.docker.com/settings/security\n# FLOWCASE_DOCKER_USERNAME=your-dockerhub-username\n# FLOWCASE_DOCKER_PASSWORD=your-dockerhub-access-token\n# FLOWCASE_DOCKER_REGISTRY=https://index.docker.io/v1/\n" >> .env
+        print_info "Added Docker Hub auth placeholders to existing .env"
+    fi
 fi
 
 # Start services
@@ -193,10 +223,7 @@ echo ""
 print_success "Flowcase is now running!"
 echo ""
 echo "Access Information:"
-echo "  - Flowcase: http://$DOMAIN or https://$DOMAIN"
-if [ "$ENABLE_AUTHENTIK" = "true" ]; then
-    echo "  - Authentik Admin: https://authentik.$DOMAIN"
-fi
+echo "  - Flowcase: http://${TS_IP}:5544"
 echo ""
 print_info "Default admin credentials will be displayed in the logs."
 echo "View logs with: docker compose logs -f"
@@ -216,12 +243,4 @@ echo ""
 docker compose logs --tail=50 web | grep -A 10 "Created default users" || true
 echo ""
 
-if [ "$ENABLE_AUTHENTIK" = "true" ]; then
-    print_info "Next steps:"
-    echo "1. Access Authentik at https://authentik.$DOMAIN"
-    echo "2. Follow the Authentik setup guide in SETUP.md"
-    echo "3. Enable Authentik middleware in docker-compose.yml"
-fi
-
 print_success "Installation complete! 🎉"
-
