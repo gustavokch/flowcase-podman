@@ -6,15 +6,35 @@ from __init__ import __version__
 
 docker_client = None
 
+def get_registry_auth():
+	"""Return Docker registry auth dict from env, or None if not configured."""
+	username = os.getenv("FLOWCASE_DOCKER_USERNAME")
+	password = os.getenv("FLOWCASE_DOCKER_PASSWORD")
+	if not username or not password:
+		return None
+	return {"username": username, "password": password}
+
 def init_docker():
 	global docker_client
-	
+
 	if docker_client is not None:
 		return docker_client
-		
+
 	try:
 		docker_client = docker.DockerClient(base_url=os.getenv("DOCKER_HOST"))
 		docker_client.ping()
+
+		# Authenticate against the registry if credentials are provided. This
+		# covers implicit pulls done by containers.run() and raises the Docker
+		# Hub anonymous pull rate limit.
+		auth = get_registry_auth()
+		if auth:
+			registry = os.getenv("FLOWCASE_DOCKER_REGISTRY", "https://index.docker.io/v1/")
+			try:
+				docker_client.login(username=auth["username"], password=auth["password"], registry=registry)
+				log("INFO", f"Authenticated to Docker registry {registry} as {auth['username']}")
+			except Exception as e:
+				log("ERROR", f"Docker registry login failed: {e}")
 
 		ensure_default_network()
 
@@ -166,13 +186,13 @@ def force_pull_required_images():
 					base_image = image_name
 					tag = "latest"
 				
-				docker_client.images.pull(base_image, tag)
+				docker_client.images.pull(base_image, tag, auth_config=get_registry_auth())
 				log("INFO", f"Successfully pulled required Docker image {image_name} ({description})")
 			except Exception as e:
 				log("ERROR", f"Error pulling required Docker image {image_name} ({description}): {e}")
-				
+
 		log("INFO", "Required image pull for Flowcase completed")
-				
+
 	except Exception as e:
 		log("ERROR", f"Error in force_pull_required_images: {str(e)}")
 
@@ -229,13 +249,13 @@ def pull_images():
 					base_image = image_name
 					tag = "latest"
 				
-				docker_client.images.pull(base_image, tag)
+				docker_client.images.pull(base_image, tag, auth_config=get_registry_auth())
 				log("INFO", f"Successfully pulled required Docker image {image_name} ({description})")
 			except Exception as e:
 				log("ERROR", f"Error pulling required Docker image {image_name} ({description}): {e}")
-				
+
 		log("INFO", "Required image pull for Flowcase completed")
-				
+
 	except Exception as e:
 		log("ERROR", f"Error in pull_images: {str(e)}")
 
@@ -290,7 +310,7 @@ def pull_single_image(registry, image_name):
 			tag = "latest"
 		
 		log("INFO", f"Manually pulling Docker image {full_image}")
-		docker_client.images.pull(repository, tag)
+		docker_client.images.pull(repository, tag, auth_config=get_registry_auth())
 		log("INFO", f"Successfully pulled Docker image {full_image}")
 		return True, f"Successfully pulled {full_image}"
 		
